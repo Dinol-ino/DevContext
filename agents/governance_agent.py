@@ -15,6 +15,8 @@ class GovernanceCheckRequest(BaseModel):
 
 class GovernanceCheckResponse(BaseModel):
     has_conflicts: bool
+    severity: str
+    matched_rules: list[str] = Field(default_factory=list)
     comment_text: str
 
 

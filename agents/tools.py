@@ -7,8 +7,33 @@ except ImportError:
     from db import get_supabase_client
 
 
+def _normalize_token(token: str) -> str:
+    if token.endswith("ing") and len(token) > 5:
+        return token[:-3]
+    if token.endswith("s") and len(token) > 3:
+        return token[:-1]
+    return token
+
+
 def _tokenize(text: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {_normalize_token(token) for token in re.findall(r"[a-z0-9]+", text.lower())}
+
+
+def _metadata_value(row: dict[str, Any], key: str) -> Any:
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, dict):
+        return metadata.get(key)
+    return None
+
+
+def _normalize_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return " ".join(str(item) for item in value.values())
+    return str(value)
 
 
 def search_nodes(question: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -16,18 +41,50 @@ def search_nodes(question: str, limit: int = 5) -> list[dict[str, Any]]:
     if client is None:
         return []
 
-    response = client.table("nodes").select("*").limit(200).execute()
+    try:
+        response = client.table("nodes").select("*").limit(200).execute()
+    except Exception:
+        return []
+
     rows: list[dict[str, Any]] = response.data or []
     if not rows:
         return []
 
     query_terms = _tokenize(question)
-    scored: list[tuple[int, dict[str, Any]]] = []
+    if not query_terms:
+        return []
+
+    scored: list[tuple[float, dict[str, Any]]] = []
 
     for row in rows:
-        row_text = " ".join(str(value) for value in row.values() if value is not None)
-        row_terms = _tokenize(row_text)
-        score = len(query_terms.intersection(row_terms))
+        searchable_fields = {
+            "label": _normalize_value(row.get("label")),
+            "type": _normalize_value(row.get("type")),
+            "reason": _normalize_value(_metadata_value(row, "reason")),
+            "services": _normalize_value(_metadata_value(row, "services")),
+            "source_url": _normalize_value(row.get("source_url")),
+        }
+
+        score = 0.0
+        for field, value in searchable_fields.items():
+            field_terms = _tokenize(value)
+            matches = query_terms.intersection(field_terms)
+            if not matches:
+                continue
+
+            weight = {
+                "label": 3.0,
+                "type": 1.5,
+                "reason": 2.5,
+                "services": 2.0,
+                "source_url": 1.0,
+            }[field]
+            score += len(matches) * weight
+
+        combined_text = " ".join(searchable_fields.values()).lower()
+        if question.lower().strip() in combined_text:
+            score += 3.0
+
         if score > 0:
             scored.append((score, row))
 
@@ -35,30 +92,21 @@ def search_nodes(question: str, limit: int = 5) -> list[dict[str, Any]]:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [row for _, row in scored[:limit]]
 
-    return rows[:limit]
+    return []
 
 
 def format_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
 
-    for index, row in enumerate(rows, start=1):
-        title = row.get("title") or row.get("name") or f"Decision {index}"
-        body = (
-            row.get("decision")
-            or row.get("summary")
-            or row.get("content")
-            or row.get("description")
-            or ""
-        )
-        snippet = str(body).strip()
-        if len(snippet) > 220:
-            snippet = f"{snippet[:217]}..."
-
+    for row in rows:
         sources.append(
             {
                 "id": row.get("id"),
-                "title": title,
-                "snippet": snippet,
+                "title": row.get("label"),
+                "type": row.get("type"),
+                "reason": _metadata_value(row, "reason"),
+                "services": _metadata_value(row, "services"),
+                "url": row.get("source_url"),
             }
         )
 
@@ -67,66 +115,122 @@ def format_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def detect_conflict(diff_text: str) -> dict[str, Any]:
     text = diff_text.lower()
-    keywords = ["rate limit", "gateway", "auth", "db"]
-    matched = [keyword for keyword in keywords if keyword in text]
+    rules = {
+        "rate limit": "medium",
+        "gateway": "medium",
+        "auth": "high",
+        "db": "high",
+        "retry": "medium",
+        "payment": "high",
+        "token": "high",
+        "cache": "low",
+    }
+    matched = [keyword for keyword in rules if keyword in text]
 
     if not matched:
         return {
             "has_conflicts": False,
-            "comment_text": "No governance-sensitive keywords were detected in the diff.",
+            "severity": "low",
+            "matched_rules": [],
+            "comment_text": "No governance-sensitive changes detected.",
         }
+
+    severity_rank = {"low": 1, "medium": 2, "high": 3}
+    severity = max((rules[keyword] for keyword in matched), key=lambda item: severity_rank[item])
 
     return {
         "has_conflicts": True,
+        "severity": severity,
+        "matched_rules": matched,
         "comment_text": (
-            "Potential governance conflicts detected for: "
-            f"{', '.join(matched)}. Verify ADR alignment before merge."
+            f"Potential {severity} governance conflict detected for: "
+            f"{', '.join(matched)}. Check related engineering decisions before merge."
         ),
     }
 
 
 def analyze_incident(error: str) -> dict[str, Any]:
     text = error.lower()
-    matched: list[str] = []
+    checks = {
+        "db": {
+            "severity": "high",
+            "cause": "Database pressure, connection exhaustion, or slow queries.",
+            "steps": [
+                "Check connection pool usage and active DB sessions.",
+                "Identify long-running queries and recent migrations.",
+                "Temporarily reduce traffic or increase pool capacity if needed.",
+            ],
+            "warnings": ["Avoid blindly restarting services before preserving DB metrics."],
+        },
+        "timeout": {
+            "severity": "medium",
+            "cause": "Slow upstream dependency or timeout settings that are too aggressive.",
+            "steps": [
+                "Trace the slow request path using logs or APM spans.",
+                "Check upstream latency and error rates.",
+                "Tune retry and timeout settings after identifying the bottleneck.",
+            ],
+            "warnings": ["Retries can amplify traffic during an outage."],
+        },
+        "payment": {
+            "severity": "high",
+            "cause": "Payment provider failure, declined API calls, or unsafe retry behavior.",
+            "steps": [
+                "Check payment provider status and API error payloads.",
+                "Verify idempotency keys are present on retryable requests.",
+                "Review recent payment service deploys and config changes.",
+            ],
+            "warnings": ["Do not replay payment requests without idempotency guarantees."],
+        },
+        "gateway": {
+            "severity": "medium",
+            "cause": "Gateway routing, rate limiting, or upstream health-check issue.",
+            "steps": [
+                "Review gateway logs for rejected or misrouted requests.",
+                "Check rate-limit rules and upstream health checks.",
+                "Validate auth headers and route configuration.",
+            ],
+            "warnings": ["Gateway changes can affect multiple services at once."],
+        },
+    }
 
-    for keyword in ["db", "timeout", "payment", "gateway"]:
-        if keyword in text:
-            matched.append(keyword)
+    matched = [keyword for keyword in checks if keyword in text]
 
     if not matched:
         return {
             "issue": "Unclassified incident signal. More context is required.",
+            "severity": "low",
+            "likely_cause": "The error does not match known incident keywords.",
             "fix_steps": [
                 "Collect logs and request IDs from the failing flow.",
                 "Check recent deploys and configuration changes.",
                 "Escalate to the owning service team with evidence.",
             ],
+            "warnings": [],
         }
 
-    issue = f"Incident likely involves: {', '.join(matched)}."
-    step_map = {
-        "db": [
-            "Inspect DB connection pool utilization and active sessions.",
-            "Increase pool size or reduce long-running transactions.",
-        ],
-        "timeout": [
-            "Trace slow upstream dependencies and increase observability.",
-            "Tune timeout/retry settings to avoid cascading failures.",
-        ],
-        "payment": [
-            "Verify payment provider status and API error responses.",
-            "Enable idempotency safeguards on retry paths.",
-        ],
-        "gateway": [
-            "Review gateway rate-limit and routing policies.",
-            "Validate auth headers and upstream health checks.",
-        ],
-    }
+    severity_rank = {"low": 1, "medium": 2, "high": 3}
+    severity = max(
+        (checks[keyword]["severity"] for keyword in matched),
+        key=lambda item: severity_rank[item],
+    )
 
     fix_steps: list[str] = []
+    warnings: list[str] = []
     for keyword in matched:
-        for step in step_map[keyword]:
+        for step in checks[keyword]["steps"]:
             if step not in fix_steps:
                 fix_steps.append(step)
+        for warning in checks[keyword]["warnings"]:
+            if warning not in warnings:
+                warnings.append(warning)
 
-    return {"issue": issue, "fix_steps": fix_steps}
+    likely_causes = [checks[keyword]["cause"] for keyword in matched]
+
+    return {
+        "issue": f"Incident likely involves: {', '.join(matched)}.",
+        "severity": severity,
+        "likely_cause": " ".join(likely_causes),
+        "fix_steps": fix_steps,
+        "warnings": warnings,
+    }

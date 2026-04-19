@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -12,12 +12,22 @@ router = APIRouter(tags=["Context"])
 
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, examples=["Why is rate limiting at gateway?"])
+    question: str = Field(..., min_length=1, examples=["Why rate limiting at gateway?"])
+
+
+class Source(BaseModel):
+    id: Any = None
+    title: Optional[str] = None
+    type: Optional[str] = None
+    reason: Any = None
+    services: Any = None
+    url: Optional[str] = None
 
 
 class AskResponse(BaseModel):
     answer: str
-    sources: list[dict[str, Any]] = Field(default_factory=list)
+    confidence: float = Field(..., ge=0, le=1)
+    sources: list[Source] = Field(default_factory=list)
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -26,9 +36,10 @@ def ask(payload: AskRequest) -> AskResponse:
     sources = format_sources(rows)
 
     if sources:
-        top_titles = ", ".join(source["title"] for source in sources[:2])
-        answer = f"Found {len(sources)} matching decision(s). Top matches: {top_titles}."
+        answer = "Found related engineering decisions."
+        confidence = min(0.95, 0.64 + (len(sources) * 0.05))
     else:
-        answer = "No matching decisions found in nodes table for the given question."
+        answer = "No related engineering decisions found."
+        confidence = 0.0
 
-    return AskResponse(answer=answer, sources=sources)
+    return AskResponse(answer=answer, confidence=round(confidence, 2), sources=sources)

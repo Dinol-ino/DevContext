@@ -15,7 +15,10 @@ class IncidentRequest(BaseModel):
 
 class IncidentResponse(BaseModel):
     issue: str
+    severity: str
+    likely_cause: str
     fix_steps: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 @router.post("/incident", response_model=IncidentResponse)
