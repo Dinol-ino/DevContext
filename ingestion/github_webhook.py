@@ -2,10 +2,11 @@ import hashlib
 import hmac
 import json
 import os
-from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from dotenv import load_dotenv
 
 try:
     from .db_insert import _get_supabase_client, insert_edges, insert_embedding, insert_node
@@ -18,22 +19,20 @@ except ImportError:
     from extractor import extract_decision
     from utils import clean_text, log_error, log_info, log_step, log_warning, make_pr_text
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_PATH = BASE_DIR / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
+
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+
 app = FastAPI(title="DevContextIQ Ingestion API", version="1.0.0")
-
-
-@lru_cache(maxsize=1)
-def _github_webhook_secret() -> str:
-    secret = clean_text(os.getenv("GITHUB_WEBHOOK_SECRET", ""))
-    if not secret:
-        raise RuntimeError("GITHUB_WEBHOOK_SECRET is not configured.")
-    return secret
 
 
 def _validate_signature(raw_body: bytes, signature_header: str | None) -> None:
     if not signature_header or not signature_header.startswith("sha256="):
         raise HTTPException(status_code=401, detail="Invalid webhook signature.")
 
-    secret = _github_webhook_secret().encode("utf-8")
+    secret = GITHUB_WEBHOOK_SECRET.encode()
     digest = hmac.new(secret, raw_body, hashlib.sha256).hexdigest()
     expected = f"sha256={digest}"
     if not hmac.compare_digest(expected, signature_header):
@@ -79,6 +78,24 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "ingestion-webhook"}
 
 
+@app.get("/env-check")
+def env_check() -> dict[str, bool]:
+    return {
+        "env_file_exists": ENV_PATH.exists(),
+        "secret_loaded": bool(GITHUB_WEBHOOK_SECRET),
+    }
+
+
+@app.on_event("startup")
+def startup_diagnostics() -> None:
+    log_info(f"loading env from {ENV_PATH}")
+    log_info(f"env file exists={ENV_PATH.exists()}")
+    if GITHUB_WEBHOOK_SECRET:
+        log_info("webhook secret loaded=True")
+    else:
+        log_warning("webhook secret loaded=False")
+
+
 @app.post("/github-webhook")
 async def github_webhook(
     request: Request,
@@ -90,15 +107,19 @@ async def github_webhook(
     delivery_id = clean_text(x_github_delivery)
     log_info(f"webhook received event={event_name or 'unknown'} delivery={delivery_id or 'unknown'}")
 
+    if not GITHUB_WEBHOOK_SECRET:
+        log_error("webhook secret missing from environment")
+        raise HTTPException(status_code=500, detail="Server webhook secret not configured")
+
     try:
         raw_body = await request.body()
         _validate_signature(raw_body, x_hub_signature_256)
     except HTTPException:
         log_warning("webhook rejected due to invalid signature")
         raise
-    except Exception as exc:
-        log_error(f"signature validation failed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Webhook signature validation failed: {exc}") from exc
+    except Exception:
+        log_error("signature validation failed")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
