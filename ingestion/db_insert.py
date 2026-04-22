@@ -92,25 +92,6 @@ def _get_or_create_node(node_type: str, label: str, metadata: dict[str, Any] | N
 
 def _insert_edge_if_missing(from_node_id: str, to_node_id: str, relation: str) -> None:
     client = _get_supabase_client()
-    try:
-        existing = (
-            client.table("edges")
-            .select("from_node_id")
-            .eq("from_node_id", from_node_id)
-            .eq("to_node_id", to_node_id)
-            .eq("relation", relation)
-            .limit(1)
-            .execute()
-        )
-    except Exception as exc:
-        log_error(f"Edge lookup failed ({from_node_id} -> {to_node_id}, {relation}): {exc}")
-        raise RuntimeError(
-            f"Failed checking existing edge ({from_node_id} -> {to_node_id}, {relation}): {exc}"
-        ) from exc
-
-    if existing.data:
-        return
-
     payload = {
         "from_node_id": from_node_id,
         "to_node_id": to_node_id,
@@ -118,13 +99,18 @@ def _insert_edge_if_missing(from_node_id: str, to_node_id: str, relation: str) -
     }
 
     try:
-        client.table("edges").insert(payload).execute()
+        client.table("edges").upsert(payload, on_conflict="from_node_id,to_node_id,relation").execute()
     except Exception as exc:
         log_error(f"Edge insert failed for relation '{relation}': {exc}")
         raise RuntimeError(f"Failed inserting edge relation '{relation}': {exc}") from exc
 
 
-def insert_node(data: dict, source_url: str) -> str:
+def insert_node(
+    data: dict,
+    source_url: str,
+    event_type: str = "decision",
+    metadata_extra: dict[str, Any] | None = None,
+) -> str:
     if not isinstance(data, dict):
         raise ValueError("insert_node expected data to be a dict.")
 
@@ -143,13 +129,117 @@ def insert_node(data: dict, source_url: str) -> str:
     if not decision:
         raise ValueError("insert_node requires a non-empty 'decision'.")
 
-    metadata = {"reason": reason, "services": services, "risk": risk}
+    metadata = {
+        "reason": reason,
+        "services": services,
+        "risk": risk,
+        "event": _clean_text(event_type) or "decision",
+    }
+    if isinstance(metadata_extra, dict):
+        metadata.update(metadata_extra)
+
     return _insert_node_row(
         node_type="decision",
         label=decision,
         metadata=metadata,
         source_url=_clean_text(source_url),
     )
+
+
+def insert_lightweight_event(
+    event_type: str,
+    label: str,
+    source_url: str,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    clean_event_type = _clean_text(event_type) or "event"
+    clean_label = _clean_text(label)
+    if not clean_label:
+        raise ValueError("insert_lightweight_event requires a non-empty label.")
+
+    final_metadata: dict[str, Any] = {"event": clean_event_type}
+    if isinstance(metadata, dict):
+        final_metadata.update(metadata)
+
+    return _insert_node_row(
+        node_type="event",
+        label=clean_label,
+        metadata=final_metadata,
+        source_url=_clean_text(source_url),
+    )
+
+
+def node_exists(source_url: str, label: str, event_type: str | None = None) -> bool:
+    client = _get_supabase_client()
+    clean_source_url = _clean_text(source_url)
+    clean_label = _clean_text(label)
+    if not clean_source_url or not clean_label:
+        return False
+
+    try:
+        result = (
+            client.table("nodes")
+            .select("id,metadata")
+            .eq("source_url", clean_source_url)
+            .eq("label", clean_label)
+            .limit(20)
+            .execute()
+        )
+    except Exception as exc:
+        log_error(f"Node duplicate lookup failed for source_url '{clean_source_url}': {exc}")
+        raise RuntimeError(f"Failed to check duplicate node for source_url '{clean_source_url}': {exc}") from exc
+
+    rows = result.data or []
+    if not rows:
+        return False
+    if not event_type:
+        return True
+
+    clean_event = _clean_text(event_type)
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if isinstance(metadata, dict):
+            existing_event = _clean_text(metadata.get("event") or metadata.get("event_type"))
+            if existing_event == clean_event:
+                return True
+    return False
+
+
+def get_graph_stats() -> dict[str, Any]:
+    client = _get_supabase_client()
+
+    def _count(table_name: str) -> int:
+        try:
+            result = client.table(table_name).select("*", count="exact", head=True).execute()
+        except Exception as exc:
+            log_error(f"Stats count failed for table '{table_name}': {exc}")
+            raise RuntimeError(f"Failed counting table '{table_name}': {exc}") from exc
+        return int(result.count or 0)
+
+    last_event = "none"
+    try:
+        recent = (
+            client.table("nodes")
+            .select("metadata")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        recent_rows = recent.data or []
+        if recent_rows:
+            metadata = recent_rows[0].get("metadata") or {}
+            if isinstance(metadata, dict):
+                last_event = _clean_text(metadata.get("event") or metadata.get("event_type")) or "none"
+    except Exception as exc:
+        log_error(f"Stats lookup for last_event failed: {exc}")
+        raise RuntimeError(f"Failed loading last_event: {exc}") from exc
+
+    return {
+        "nodes": _count("nodes"),
+        "edges": _count("edges"),
+        "embeddings": _count("node_embeddings"),
+        "last_event": last_event,
+    }
 
 
 def insert_embedding(node_id: str, chunk: str, embedding: list[float]) -> None:
