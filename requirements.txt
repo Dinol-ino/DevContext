@@ -4,4 +4,3 @@ python-dotenv
 supabase
 requests
 sentence-transformers
-python-multipart
