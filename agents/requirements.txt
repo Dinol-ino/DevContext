@@ -1,7 +1,15 @@
 fastapi
 uvicorn
+<<<<<<< HEAD
 python-dotenv
 supabase
 pydantic
 google-genai
 httpx
+=======
+supabase
+python-dotenv
+pydantic
+httpx
+requests
+>>>>>>> feature/person-b-agents

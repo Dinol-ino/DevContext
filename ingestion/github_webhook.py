@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import hashlib
 import hmac
 import json
@@ -74,6 +75,13 @@ def startup_diagnostics() -> None:
     log_info(f"loading env from {ENV_PATH}")
     log_info(f"env file exists={ENV_PATH.exists()}")
     log_info(f"webhook secret loaded={bool(GITHUB_WEBHOOK_SECRET)}")
+=======
+from fastapi import FastAPI
+from .extractor import extract_decision
+import traceback
+from .db_insert import insert_decision
+app = FastAPI()
+>>>>>>> feature/person-b-agents
 
 
 @app.post("/github-webhook")
@@ -202,6 +210,15 @@ async def github_webhook(
             "node_id": node_id,
             "decision": decision_data,
         }
+<<<<<<< HEAD
     except Exception as exc:
         log_warning(f"tier1 processing failed event={event_name}: {exc}")
         return _ignored_event(event_name)
+=======
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }
+>>>>>>> feature/person-b-agents
