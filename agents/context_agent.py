@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 try:
@@ -30,16 +30,41 @@ class AskResponse(BaseModel):
     sources: list[Source] = Field(default_factory=list)
 
 
+def _build_answer(rows: list[dict[str, Any]]) -> tuple[str, float]:
+    if not rows:
+        return ("No matching decisions found for the question.", 0.0)
+
+    top_rows = rows[:3]
+    lines: list[str] = []
+    scores = [float(row.get("_match_score", 0.0)) for row in top_rows]
+    confidence = min(0.98, 0.45 + (max(scores) / 10.0 if scores else 0.0))
+
+    for row in top_rows:
+        label = str(row.get("label") or "Unnamed decision")
+        metadata = row.get("metadata") or {}
+        reason = metadata.get("reason") if isinstance(metadata, dict) else None
+        services = metadata.get("services") if isinstance(metadata, dict) else None
+        service_text = ", ".join(str(item) for item in services) if isinstance(services, list) and services else ""
+
+        sentence = label
+        if reason:
+            sentence += f": {str(reason).strip()}"
+        if service_text:
+            sentence += f" Services: {service_text}."
+        else:
+            sentence += "."
+        lines.append(sentence)
+
+    answer = "Relevant decisions: " + " ".join(lines)
+    return answer, round(confidence, 2)
+
+
 @router.post("/ask", response_model=AskResponse)
 def ask(payload: AskRequest) -> AskResponse:
-    rows = search_nodes(payload.question)
-    sources = format_sources(rows)
-
-    if sources:
-        answer = "Found related engineering decisions."
-        confidence = min(0.95, 0.64 + (len(sources) * 0.05))
-    else:
-        answer = "No related engineering decisions found."
-        confidence = 0.0
-
-    return AskResponse(answer=answer, confidence=round(confidence, 2), sources=sources)
+    try:
+        rows = search_nodes(payload.question)
+        sources = format_sources(rows)
+        answer, confidence = _build_answer(rows)
+        return AskResponse(answer=answer, confidence=confidence, sources=sources)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to answer question: {exc}") from exc

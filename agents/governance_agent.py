@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 try:
@@ -18,9 +18,13 @@ class GovernanceCheckResponse(BaseModel):
     severity: str
     matched_rules: list[str] = Field(default_factory=list)
     comment_text: str
+    safe_to_merge: bool
 
 
 @router.post("/governance/check", response_model=GovernanceCheckResponse)
 def check(payload: GovernanceCheckRequest) -> GovernanceCheckResponse:
-    result = detect_conflict(payload.diff_text)
-    return GovernanceCheckResponse(**result)
+    try:
+        result = detect_conflict(payload.diff_text)
+        return GovernanceCheckResponse(**result)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to run governance check: {exc}") from exc

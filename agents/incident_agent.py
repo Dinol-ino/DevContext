@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 try:
@@ -10,7 +10,9 @@ router = APIRouter(tags=["Incident"])
 
 
 class IncidentRequest(BaseModel):
-    error: str = Field(..., min_length=1, examples=["db connections exhausted"])
+    alert_title: str = Field(default="", examples=["Payment API latency spike"])
+    service_name: str = Field(default="", examples=["payments"])
+    error_snippet: str = Field(default="", examples=["db connections exhausted"])
 
 
 class IncidentResponse(BaseModel):
@@ -23,5 +25,12 @@ class IncidentResponse(BaseModel):
 
 @router.post("/incident", response_model=IncidentResponse)
 def incident(payload: IncidentRequest) -> IncidentResponse:
-    result = analyze_incident(payload.error)
-    return IncidentResponse(**result)
+    try:
+        result = analyze_incident(
+            alert_title=payload.alert_title,
+            service_name=payload.service_name,
+            error_snippet=payload.error_snippet,
+        )
+        return IncidentResponse(**result)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to analyze incident: {exc}") from exc
