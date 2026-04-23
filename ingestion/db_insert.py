@@ -1,7 +1,6 @@
 # ingestion/db_insert.py
 
 import os
-<<<<<<< HEAD
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -288,7 +287,6 @@ def insert_edges(node_id: str, repo: str, author: str, services: list[str]) -> N
     for service_name in service_names:
         service_node_id = _get_or_create_node("service", service_name)
         _insert_edge_if_missing(clean_node_id, service_node_id, "affects_service")
-=======
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
@@ -368,4 +366,3 @@ def insert_decision(data: Dict[str, Any], source_url: str = "") -> Dict[str, Any
             "success": False,
             "error": str(e)
         }
->>>>>>> feature/person-b-agents
