@@ -6,10 +6,7 @@ from typing import Optional
 
 from sentence_transformers import SentenceTransformer
 
-try:
-    from .utils import clean_text, log_error, log_step
-except ImportError:
-    from utils import clean_text, log_error, log_step
+from .utils import clean_text, log_error, log_step
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 _model: Optional[SentenceTransformer] = None

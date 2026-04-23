@@ -8,10 +8,7 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
-try:
-    from .utils import clean_text, log_error, log_step, log_warning, safe_json
-except ImportError:
-    from utils import clean_text, log_error, log_step, log_warning, safe_json
+from .utils import clean_text, log_error, log_step, log_warning, safe_json
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BASE_DIR / ".env"

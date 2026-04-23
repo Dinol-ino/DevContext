@@ -6,10 +6,7 @@ from typing import Any
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-try:
-    from .utils import log_error
-except ImportError:
-    from utils import log_error
+from .utils import log_error
 
 
 def _load_env() -> None:

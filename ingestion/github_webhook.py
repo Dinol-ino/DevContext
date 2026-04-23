@@ -8,30 +8,17 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
-try:
-    from .db_insert import (
-        get_graph_stats,
-        insert_edges,
-        insert_embedding,
-        insert_lightweight_event,
-        insert_node,
-        node_exists,
-    )
-    from .embed import generate_embedding
-    from .extractor import extract_decision, parse_github_event
-    from .utils import clean_text, log_error, log_info, log_step, log_warning
-except ImportError:
-    from db_insert import (
-        get_graph_stats,
-        insert_edges,
-        insert_embedding,
-        insert_lightweight_event,
-        insert_node,
-        node_exists,
-    )
-    from embed import generate_embedding
-    from extractor import extract_decision, parse_github_event
-    from utils import clean_text, log_error, log_info, log_step, log_warning
+from .db_insert import (
+    get_graph_stats,
+    insert_edges,
+    insert_embedding,
+    insert_lightweight_event,
+    insert_node,
+    node_exists,
+)
+from .embed import generate_embedding
+from .extractor import extract_decision, parse_github_event
+from .utils import clean_text, log_error, log_info, log_step, log_warning
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BASE_DIR / ".env"
