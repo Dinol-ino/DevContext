@@ -1,47 +1,73 @@
 from __future__ import annotations
 
-import math
-import threading
-from typing import Optional
+import os
+import time
+from pathlib import Path
 
-from sentence_transformers import SentenceTransformer
+import requests
+from dotenv import load_dotenv
 
-from .utils import clean_text, log_error, log_step
+from .utils import clean_text, log_error, log_warning
 
-MODEL_NAME = "all-MiniLM-L6-v2"
-_model: Optional[SentenceTransformer] = None
-_model_lock = threading.Lock()
+BASE_DIR = Path(__file__).resolve().parents[1]
+ENV_PATH = BASE_DIR / ".env"
+load_dotenv(dotenv_path=ENV_PATH, override=False)
 
-
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        with _model_lock:
-            if _model is None:
-                log_step(f"Loading embedding model '{MODEL_NAME}'.")
-                _model = SentenceTransformer(MODEL_NAME)
-    return _model
+OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 768
+MAX_TEXT_LENGTH = 6000
+TIMEOUT_SECONDS = 20
+MAX_ATTEMPTS = 2
 
 
-def _normalize(vector: list[float]) -> list[float]:
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0:
-        return []
-    return [value / norm for value in vector]
+def _trim_text(text: str) -> str:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return ""
+    if len(cleaned) > MAX_TEXT_LENGTH:
+        return cleaned[:MAX_TEXT_LENGTH].strip()
+    return cleaned
 
 
 def generate_embedding(text: str) -> list[float]:
-    cleaned = clean_text(text)
+    cleaned = _trim_text(text)
     if not cleaned:
         return []
 
-    try:
-        model = _get_model()
-        embedding = model.encode(cleaned, normalize_embeddings=True)
-        vector = embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
-        if not vector:
-            return []
-        return _normalize([float(value) for value in vector])
-    except Exception as exc:
-        log_error(f"Embedding generation failed: {exc}")
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        log_warning("OPENAI_API_KEY not configured; embedding skipped.")
         return []
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": EMBEDDING_MODEL,
+        "input": cleaned,
+        "dimensions": EMBEDDING_DIMENSIONS,
+    }
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = requests.post(
+                OPENAI_EMBEDDINGS_URL,
+                headers=headers,
+                json=payload,
+                timeout=TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            data = response.json()
+            embedding = data.get("data", [{}])[0].get("embedding", [])
+            if not isinstance(embedding, list) or not embedding:
+                return []
+            return [float(value) for value in embedding]
+        except Exception as exc:
+            if attempt >= MAX_ATTEMPTS:
+                log_error(f"OpenAI embedding request failed: {exc}")
+                return []
+            time.sleep(1)
+
+    return []

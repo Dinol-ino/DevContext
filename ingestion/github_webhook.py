@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
@@ -22,7 +24,7 @@ from .utils import clean_text, log_error, log_info, log_step, log_warning
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BASE_DIR / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
+load_dotenv(dotenv_path=ENV_PATH, override=False)
 
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
 
@@ -35,13 +37,13 @@ app = FastAPI(title="DevContextIQ Ingestion API", version="1.0.0")
 
 def _validate_signature(raw_body: bytes, signature_header: str | None) -> None:
     if not signature_header or not signature_header.startswith("sha256="):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     secret = GITHUB_WEBHOOK_SECRET.encode()
     digest = hmac.new(secret, raw_body, hashlib.sha256).hexdigest()
     expected = f"sha256={digest}"
     if not hmac.compare_digest(expected, signature_header):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
 
 def _ignored_event(event_name: str) -> dict[str, str]:
@@ -52,7 +54,14 @@ def _safe_source_url(event_name: str, source_url: str, delivery_id: str) -> str:
     clean_url = clean_text(source_url)
     if clean_url:
         return clean_url
-    return f"event://{event_name}/{delivery_id or 'unknown'}"
+    return f"event://{event_name or 'unknown'}/{delivery_id or 'unknown'}"
+
+
+@app.on_event("startup")
+def startup_diagnostics() -> None:
+    log_info(f"loading env from {ENV_PATH}")
+    log_info(f"env file exists={ENV_PATH.exists()}")
+    log_info(f"webhook secret loaded={bool(GITHUB_WEBHOOK_SECRET)}")
 
 
 @app.get("/health")
@@ -69,17 +78,6 @@ def stats() -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Failed to load stats: {exc}") from exc
 
 
-@app.on_event("startup")
-def startup_diagnostics() -> None:
-    log_info(f"loading env from {ENV_PATH}")
-    log_info(f"env file exists={ENV_PATH.exists()}")
-    log_info(f"webhook secret loaded={bool(GITHUB_WEBHOOK_SECRET)}")
-from fastapi import FastAPI
-from .extractor import extract_decision
-import traceback
-from .db_insert import insert_decision
-app = FastAPI()
-
 @app.post("/github-webhook")
 async def github_webhook(
     request: Request,
@@ -89,20 +87,14 @@ async def github_webhook(
 ) -> dict[str, Any]:
     event_name = clean_text(x_github_event).lower()
     delivery_id = clean_text(x_github_delivery)
-    log_info(f"received event={event_name or 'unknown'}")
+    log_info(f"received event={event_name or 'unknown'} delivery={delivery_id or 'unknown'}")
 
     if not GITHUB_WEBHOOK_SECRET:
         log_error("webhook secret missing from environment")
         raise HTTPException(status_code=500, detail="Server webhook secret not configured")
 
-    try:
-        raw_body = await request.body()
-        _validate_signature(raw_body, x_hub_signature_256)
-    except HTTPException:
-        raise
-    except Exception:
-        log_warning("signature validation failed")
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    raw_body = await request.body()
+    _validate_signature(raw_body, x_hub_signature_256)
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
@@ -159,11 +151,7 @@ async def github_webhook(
     try:
         summary_text = clean_text(event_data.get("summary_text"))
         decision_data = extract_decision(summary_text)
-        decision_label = clean_text(decision_data.get("decision"))
-        if event_name == "push":
-            decision_label = label or decision_label
-        if not decision_label:
-            decision_label = label or "Untitled decision"
+        decision_label = clean_text(decision_data.get("decision")) or label or "Untitled decision"
         decision_data["decision"] = decision_label
 
         if node_exists(source_url, decision_label, event_name):
@@ -177,28 +165,28 @@ async def github_webhook(
             metadata_extra=metadata if isinstance(metadata, dict) else None,
         )
 
-        if event_name == "push":
-            log_info("processed push node inserted")
-        else:
-            log_info("processed pull_request node inserted")
+        try:
+            insert_edges(
+                node_id=node_id,
+                repo=clean_text(event_data.get("repo")),
+                author=clean_text(event_data.get("author")),
+                services=decision_data.get("services", []),
+            )
+            log_step(f"edges inserted node_id={node_id}")
+        except Exception as exc:
+            log_warning(f"edge insert skipped node_id={node_id}: {exc}")
 
-        embedding = generate_embedding(summary_text)
-        if embedding:
-            insert_embedding(node_id=node_id, chunk=summary_text, embedding=embedding)
-            log_step(f"embedding inserted node_id={node_id}")
-        else:
-            log_warning(f"embedding skipped node_id={node_id}")
+        try:
+            embedding = generate_embedding(summary_text)
+            if embedding:
+                insert_embedding(node_id=node_id, chunk=summary_text, embedding=embedding)
+                log_step(f"embedding inserted node_id={node_id}")
+            else:
+                log_warning(f"embedding skipped node_id={node_id}")
+        except Exception as exc:
+            log_warning(f"embedding flow failed node_id={node_id}: {exc}")
 
-        services = decision_data.get("services", [])
-        services = services if isinstance(services, list) else []
-        insert_edges(
-            node_id=node_id,
-            repo=clean_text(event_data.get("repo")),
-            author=clean_text(event_data.get("author")),
-            services=services,
-        )
-        log_step(f"edges inserted node_id={node_id}")
-
+        log_info(f"processed {event_name} node inserted")
         return {
             "received": True,
             "processed": True,
@@ -209,9 +197,3 @@ async def github_webhook(
     except Exception as exc:
         log_warning(f"tier1 processing failed event={event_name}: {exc}")
         return _ignored_event(event_name)
-
-    except Exception as e:
-        return {
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }
