@@ -373,6 +373,4 @@ Built for Google Build for AI Hackathon, April 2026.
 - Free tier: 60 requests per minute
 - Add exponential backoff retry logic in agents
 - For fallback we've used OpenRouter 
-
-
-Open an issue on GitHub or email the team.
+  Backend almost done, some of the shits still to do
