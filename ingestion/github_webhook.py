@@ -1,7 +1,7 @@
 from fastapi import FastAPI
-from extractor import extract_decision
+from .extractor import extract_decision
 import traceback
-from db_insert import insert_decision
+from .db_insert import insert_decision
 app = FastAPI()
 
 
