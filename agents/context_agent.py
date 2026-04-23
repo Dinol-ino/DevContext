@@ -4,15 +4,18 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 try:
-    from .tools import format_sources, search_nodes
+    from .prompts import CONTEXT_SYSTEM_PROMPT
+    from .tools import call_llm, format_sources, retrieve_context
 except ImportError:
-    from tools import format_sources, search_nodes
+    from prompts import CONTEXT_SYSTEM_PROMPT
+    from tools import call_llm, format_sources, retrieve_context
 
+USED_MODEL = "deepseek/deepseek-chat"
 router = APIRouter(tags=["Context"])
 
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, examples=["Why rate limiting at gateway?"])
+    question: str = Field(..., min_length=1, examples=["Why was gateway rate limiting introduced?"])
 
 
 class Source(BaseModel):
@@ -28,43 +31,65 @@ class AskResponse(BaseModel):
     answer: str
     confidence: float = Field(..., ge=0, le=1)
     sources: list[Source] = Field(default_factory=list)
+    used_model: str
 
 
-def _build_answer(rows: list[dict[str, Any]]) -> tuple[str, float]:
-    if not rows:
-        return ("No matching decisions found for the question.", 0.0)
+def _deterministic_answer(evidence: list[dict[str, Any]]) -> str:
+    if not evidence:
+        return "Insufficient internal context to answer this question."
 
-    top_rows = rows[:3]
-    lines: list[str] = []
-    scores = [float(row.get("_match_score", 0.0)) for row in top_rows]
-    confidence = min(0.98, 0.45 + (max(scores) / 10.0 if scores else 0.0))
-
+    top_rows = evidence[:3]
+    parts: list[str] = []
     for row in top_rows:
         label = str(row.get("label") or "Unnamed decision")
         metadata = row.get("metadata") or {}
         reason = metadata.get("reason") if isinstance(metadata, dict) else None
         services = metadata.get("services") if isinstance(metadata, dict) else None
-        service_text = ", ".join(str(item) for item in services) if isinstance(services, list) and services else ""
 
         sentence = label
         if reason:
             sentence += f": {str(reason).strip()}"
-        if service_text:
-            sentence += f" Services: {service_text}."
+        if isinstance(services, list) and services:
+            sentence += f" Services: {', '.join(str(item) for item in services)}."
         else:
             sentence += "."
-        lines.append(sentence)
-
-    answer = "Relevant decisions: " + " ".join(lines)
-    return answer, round(confidence, 2)
+        parts.append(sentence)
+    return " ".join(parts)
 
 
 @router.post("/ask", response_model=AskResponse)
 def ask(payload: AskRequest) -> AskResponse:
     try:
-        rows = search_nodes(payload.question)
-        sources = format_sources(rows)
-        answer, confidence = _build_answer(rows)
-        return AskResponse(answer=answer, confidence=confidence, sources=sources)
+        context = retrieve_context(payload.question)
+        evidence = context.get("evidence", [])
+        sources = format_sources(evidence)
+        confidence = float(context.get("confidence", 0.0))
+
+        if not evidence:
+            return AskResponse(
+                answer="Insufficient internal context to answer this question.",
+                confidence=0.0,
+                sources=[],
+                used_model=USED_MODEL,
+            )
+
+        evidence_text = "\n".join(
+            f"- {row.get('label')}: {((row.get('metadata') or {}).get('reason') if isinstance(row.get('metadata'), dict) else '')}"
+            for row in evidence[:5]
+        )
+        llm_answer = call_llm(
+            CONTEXT_SYSTEM_PROMPT,
+            f"Question: {payload.question}\n\nEvidence:\n{evidence_text}",
+        )
+        answer = llm_answer or _deterministic_answer(evidence)
+
+        return AskResponse(
+            answer=answer,
+            confidence=confidence,
+            sources=sources,
+            used_model=USED_MODEL,
+        )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to answer question: {exc}") from exc
