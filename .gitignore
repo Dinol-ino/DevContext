@@ -13,8 +13,6 @@ build/
 .env
 ingestion/__pycache__/
 node_modules/
-package-lock.json
-package.json
 req.txt
 test.js
 test_backend.py
