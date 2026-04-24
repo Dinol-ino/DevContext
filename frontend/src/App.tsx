@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { apiBaseUrl, healthCheck, runGovernanceCheck, runIncidentAnalysis } from "./api";
 import { Chat } from "./Chat";
 import {
   getCurrentUser,
   isSupabaseConfigured,
-  signInWithGoogle,
   signOutUser,
   subscribeToAuthChanges,
   supabaseUrl,
+  signInWithEmail,
+  signUpWithEmail,
 } from "./supabase";
 import type {
   AppToast,
@@ -21,7 +22,6 @@ import type {
   UserProfile,
 } from "./types";
 
-const GUEST_STORAGE_KEY = "devcontextiq:guest-mode";
 const REPO_STORAGE_KEY = "devcontextiq:selected-repo";
 const HEALTH_RETRY_DELAY_MS = 2000;
 
@@ -45,20 +45,8 @@ const searchPlaceholders: Record<NavKey, string> = {
   settings: "Search settings",
 };
 
-const createGuestUser = (): UserProfile => ({
-  id: "guest-demo",
-  email: "guest@demo.devcontextiq",
-  fullName: "Guest Demo",
-  avatarUrl: null,
-});
-
-function buildHealthState(
-  status: string,
-  version?: string,
-  overrides?: Partial<BackendHealth>,
-): BackendHealth {
+function buildHealthState(status: string, version?: string, overrides?: Partial<BackendHealth>): BackendHealth {
   const state: BackendHealth["state"] = status === "ok" ? "healthy" : "degraded";
-
   return {
     state,
     label: state === "healthy" ? statusLabels.healthy : statusLabels.degraded,
@@ -69,9 +57,7 @@ function buildHealthState(
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function App(): JSX.Element {
@@ -82,76 +68,44 @@ function App(): JSX.Element {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>("");
   const [toasts, setToasts] = useState<AppToast[]>([]);
-  const [health, setHealth] = useState<BackendHealth>({
-    state: "checking",
-    label: statusLabels.checking,
-  });
+  const [health, setHealth] = useState<BackendHealth>({ state: "checking", label: statusLabels.checking });
+
+  // Email Auth States
+  const [isRegistering, setIsRegistering] = useState<boolean>(false);
+  const [email, setEmail] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
+    if (typeof window === "undefined") return;
     const storedRepo = window.localStorage.getItem(REPO_STORAGE_KEY) ?? "";
     setSelectedRepo(storedRepo);
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
+    if (typeof window === "undefined") return;
     window.localStorage.setItem(REPO_STORAGE_KEY, selectedRepo);
   }, [selectedRepo]);
 
   useEffect(() => {
     let isMounted = true;
 
-    const hydrateGuest = (): void => {
-      if (!isMounted) {
-        return;
-      }
-
-      setAuthMode("guest");
-      setCurrentUser(createGuestUser());
-    };
-
     const initializeAuth = async (): Promise<void> => {
-      const guestEnabled =
-        typeof window !== "undefined" && window.localStorage.getItem(GUEST_STORAGE_KEY) === "1";
-
       if (isSupabaseConfigured) {
         const user = await getCurrentUser();
-        if (!isMounted) {
-          return;
-        }
+        if (!isMounted) return;
 
         if (user) {
           setAuthMode("supabase");
           setCurrentUser(user);
-        } else if (guestEnabled) {
-          hydrateGuest();
         }
-      } else if (guestEnabled) {
-        hydrateGuest();
       }
-
-      if (isMounted) {
-        setAuthLoading(false);
-      }
+      if (isMounted) setAuthLoading(false);
     };
 
     void initializeAuth();
 
     const unsubscribe = subscribeToAuthChanges((user) => {
-      if (!isMounted || !user) {
-        return;
-      }
-
-      if (typeof window !== "undefined") {
-        window.localStorage.removeItem(GUEST_STORAGE_KEY);
-      }
-
+      if (!isMounted || !user) return;
       setAuthMode("supabase");
       setCurrentUser(user);
       setAuthLoading(false);
@@ -166,110 +120,60 @@ function App(): JSX.Element {
   const pushToast = (tone: ToastTone, title: string, description: string): void => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setToasts((current) => [...current, { id, tone, title, description }]);
-
     window.setTimeout(() => {
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 4200);
   };
 
   const runHealthCheck = async (showToast: boolean): Promise<void> => {
-    setHealth({
-      state: "checking",
-      label: statusLabels.checking,
-    });
-
+    setHealth({ state: "checking", label: statusLabels.checking });
     try {
       const response = await healthCheck();
       setHealth(buildHealthState(response.status, response.version));
-
-      if (showToast) {
-        pushToast("success", "Backend check complete", "The API responded successfully.");
-      }
-      return;
     } catch (firstError) {
-      setHealth({
-        state: "checking",
-        label: "Waking backend...",
-        error: firstError instanceof Error ? firstError.message : "Initial health check failed.",
-      });
-    }
-
-    await delay(HEALTH_RETRY_DELAY_MS);
-
-    try {
-      const response = await healthCheck();
-      setHealth(buildHealthState(response.status, response.version));
-
-      if (showToast) {
-        pushToast("success", "Backend check complete", "The backend responded after wake-up.");
-      }
-    } catch (retryError) {
-      setHealth({
-        state: "degraded",
-        label: statusLabels.degraded,
-        error: retryError instanceof Error ? retryError.message : "Unable to reach backend.",
-        checkedAt: new Date().toISOString(),
-      });
-
-      if (showToast) {
-        pushToast("error", "Backend unavailable", retryError instanceof Error ? retryError.message : "Health check failed.");
-      }
+      setHealth({ state: "checking", label: "Waking backend...", error: firstError instanceof Error ? firstError.message : "Failed." });
     }
   };
 
   useEffect(() => {
     let cancelled = false;
-
     const initializeHealth = async (): Promise<void> => {
-      if (cancelled) {
+      if (cancelled) return;
+      await runHealthCheck(false);
+    };
+    void initializeHealth();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) {
+      pushToast("error", "Details required", "Please enter both email and password.");
+      return;
+    }
+
+    try {
+      const result = isRegistering 
+        ? await signUpWithEmail(email, password)
+        : await signInWithEmail(email, password);
+
+      if (!result.ok) {
+        pushToast("error", "Authentication failed", result.error || "An error occurred.");
         return;
       }
 
-      await runHealthCheck(false);
-    };
-
-    void initializeHealth();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const userInitials = useMemo(() => {
-    const value = currentUser?.fullName ?? currentUser?.email ?? "DC";
-    const parts = value.split(" ").filter(Boolean).slice(0, 2);
-    return parts.map((part) => part[0]?.toUpperCase() ?? "").join("") || "DC";
-  }, [currentUser]);
-
-  const handleRefreshHealth = async (): Promise<void> => {
-    await runHealthCheck(true);
-  };
-
-  const handleContinueAsGuest = (): void => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(GUEST_STORAGE_KEY, "1");
-    }
-
-    setAuthMode("guest");
-    setCurrentUser(createGuestUser());
-    pushToast("info", "Guest demo enabled", "You can explore the full product shell without auth.");
-  };
-
-  const handleGoogleSignIn = async (): Promise<void> => {
-    const result = await signInWithGoogle();
-    if (!result.ok) {
-      pushToast("error", "Google sign-in unavailable", result.error ?? "Supabase auth is not configured.");
+      pushToast("success", isRegistering ? "Account created" : "Welcome back", "You are now logged in.");
+    } catch (error) {
+      pushToast("error", "Authentication failed", "An unexpected error occurred.");
     }
   };
 
   const handleSignOut = async (): Promise<void> => {
-    if (typeof window !== "undefined") {
-      window.localStorage.removeItem(GUEST_STORAGE_KEY);
-    }
-
     await signOutUser();
     setAuthMode(null);
     setCurrentUser(null);
+    setEmail("");
+    setPassword("");
     pushToast("info", "Signed out", "Your session has been cleared.");
   };
 
@@ -277,7 +181,6 @@ function App(): JSX.Element {
     return (
       <div className="auth-shell">
         <div className="auth-card auth-loading-card">
-          <div className="badge badge-muted">Preparing workspace</div>
           <div className="skeleton skeleton-title" />
           <div className="skeleton skeleton-line" />
           <div className="skeleton skeleton-line short" />
@@ -291,40 +194,49 @@ function App(): JSX.Element {
       <>
         <div className="auth-shell">
           <div className="auth-card">
-            <div className="badge badge-primary">DevContextIQ</div>
-            <p className="eyebrow">Unified Engineering Intelligence Platform</p>
-            <h1 className="auth-title">
+            <h1 className="auth-title" style={{ marginBottom: "1rem" }}>
               Engineering memory,
               <span> structured for decisions.</span>
             </h1>
-            <p className="auth-copy">
-              Ask what changed, recover architectural rationale, analyze merge risk, and turn incidents into reusable
-              operating knowledge.
+            <p className="auth-copy" style={{ marginBottom: "2rem" }}>
+              Ask what changed, recover architectural rationale, analyze merge risk, and turn incidents into reusable operating knowledge.
             </p>
 
-            <div className="auth-actions">
-              <button className="button button-primary" onClick={() => void handleGoogleSignIn()} type="button">
-                Continue with Google
-              </button>
-              <button className="button button-secondary" onClick={handleContinueAsGuest} type="button">
-                Continue as Guest Demo
-              </button>
-            </div>
+            <form onSubmit={handleEmailAuth} style={{ display: "flex", flexDirection: "column", gap: "1rem", maxWidth: "24rem", margin: "0 auto" }}>
+              <div className="field-group" style={{ textAlign: "left" }}>
+                <label className="field-label">Email Address</label>
+                <input 
+                  type="email" 
+                  className="input" 
+                  placeholder="you@company.com"
+                  value={email} 
+                  onChange={(e) => setEmail(e.target.value)} 
+                />
+              </div>
+              <div className="field-group" style={{ textAlign: "left" }}>
+                <label className="field-label">Password</label>
+                <input 
+                  type="password" 
+                  className="input" 
+                  placeholder="••••••••"
+                  value={password} 
+                  onChange={(e) => setPassword(e.target.value)} 
+                />
+              </div>
 
-            <div className="auth-footnotes">
-              <div className="meta-chip">
-                <span className="meta-label">Backend</span>
-                <span>{health.label}</span>
-              </div>
-              <div className="meta-chip">
-                <span className="meta-label">Auth</span>
-                <span>{isSupabaseConfigured ? "Supabase ready" : "Placeholder mode"}</span>
-              </div>
-              <div className="meta-chip">
-                <span className="meta-label">API base</span>
-                <span>{apiBaseUrl}</span>
-              </div>
-            </div>
+              <button className="button button-primary button-wide" type="submit" style={{ marginTop: "0.5rem" }}>
+                {isRegistering ? "Create Account" : "Log In"}
+              </button>
+            </form>
+
+            <button 
+              className="button button-ghost" 
+              onClick={() => setIsRegistering(!isRegistering)} 
+              type="button"
+              style={{ marginTop: "1.5rem" }}
+            >
+              {isRegistering ? "Already have an account? Log in" : "Need an account? Register"}
+            </button>
           </div>
         </div>
         <ToastStack toasts={toasts} />
@@ -336,15 +248,7 @@ function App(): JSX.Element {
     <>
       <div className="app-shell">
         <aside className={`sidebar ${isSidebarOpen ? "sidebar-open" : ""}`}>
-          <div className="sidebar-header">
-            <div className="logo-mark">D</div>
-            <div>
-              <div className="sidebar-title">DevContextIQ</div>
-              <div className="sidebar-subtitle">Engineering memory</div>
-            </div>
-          </div>
-
-          <nav className="sidebar-nav" aria-label="Primary navigation">
+          <nav className="sidebar-nav" aria-label="Primary navigation" style={{ marginTop: "1rem" }}>
             {navItems.map((item) => (
               <button
                 key={item.key}
@@ -369,6 +273,9 @@ function App(): JSX.Element {
               <div className="workspace-title">Workspace</div>
               <div className="workspace-value">{selectedRepo || "No repository selected"}</div>
             </div>
+            <button onClick={handleSignOut} style={{ background: 'transparent', border: 'none', color: 'var(--text-soft)', marginTop: '1rem', cursor: 'pointer', fontSize: '0.85rem', width: '100%', textAlign: 'left' }}>
+              Log out
+            </button>
           </div>
         </aside>
 
@@ -398,35 +305,11 @@ function App(): JSX.Element {
                 <input readOnly value={searchPlaceholders[activeView]} />
               </label>
             </div>
-
-            <div className="topbar-right">
-              <button className={`status-pill status-${health.state}`} onClick={() => void handleRefreshHealth()} type="button">
-                <span className="status-dot" />
-                <span>{health.label}</span>
-                {health.version ? <span className="status-version">v{health.version}</span> : null}
-              </button>
-
-              <div className="profile-pill">
-                {currentUser.avatarUrl ? (
-                  <img alt={currentUser.fullName ?? currentUser.email} className="avatar-image" src={currentUser.avatarUrl} />
-                ) : (
-                  <span className="avatar-fallback">{userInitials}</span>
-                )}
-                <div className="profile-meta">
-                  <strong>{currentUser.fullName ?? "DevContextIQ User"}</strong>
-                  <small>{currentUser.email}</small>
-                </div>
-                <button className="button button-ghost" onClick={() => void handleSignOut()} type="button">
-                  Sign out
-                </button>
-              </div>
-            </div>
+            <div className="topbar-right"></div>
           </header>
 
           <main className="content-shell">
-            {activeView === "chat" ? (
-              <Chat onNotify={pushToast} repoId={selectedRepo} />
-            ) : null}
+            {activeView === "chat" ? <Chat onNotify={pushToast} repoId={selectedRepo} /> : null}
             {activeView === "governance" ? <GovernancePanel onNotify={pushToast} /> : null}
             {activeView === "incident" ? <IncidentPanel onNotify={pushToast} /> : null}
             {activeView === "settings" ? (
@@ -446,6 +329,8 @@ function App(): JSX.Element {
   );
 }
 
+// --- SUB-COMPONENTS ---
+
 type Notify = (tone: ToastTone, title: string, description: string) => void;
 
 function GovernancePanel({ onNotify }: { onNotify: Notify }): JSX.Element {
@@ -457,28 +342,20 @@ function GovernancePanel({ onNotify }: { onNotify: Notify }): JSX.Element {
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-
     if (!diffText.trim()) {
       onNotify("error", "Diff required", "Paste the PR diff before running the governance check.");
       return;
     }
-
     setLoading(true);
     setError("");
 
     try {
-      const response = await runGovernanceCheck({
-        pr_url: prUrl.trim(),
-        diff_text: diffText.trim(),
-      });
-
+      const response = await runGovernanceCheck({ pr_url: prUrl.trim(), diff_text: diffText.trim() });
       setResult(response);
       onNotify(
         response.safe_to_merge ? "success" : "warning",
         response.safe_to_merge ? "Risk review complete" : "Conflicts detected",
-        response.safe_to_merge
-          ? "No blocking architecture conflicts were detected."
-          : "Review the recommendation before merging.",
+        response.safe_to_merge ? "No blocking architecture conflicts were detected." : "Review the recommendation before merging.",
       );
     } catch (errorValue) {
       const message = errorValue instanceof Error ? errorValue.message : "Request failed.";
@@ -501,32 +378,15 @@ function GovernancePanel({ onNotify }: { onNotify: Notify }): JSX.Element {
       </div>
 
       <div className="split-layout">
-        <form className="panel form-panel" onSubmit={(event) => void handleSubmit(event)}>
+        <form className="panel form-panel" onSubmit={handleSubmit}>
           <div className="field-group">
-            <label className="field-label" htmlFor="pr-url">
-              PR URL
-            </label>
-            <input
-              id="pr-url"
-              className="input"
-              onChange={(event) => setPrUrl(event.target.value)}
-              placeholder="https://github.com/org/repo/pull/312"
-              type="url"
-              value={prUrl}
-            />
+            <label className="field-label" htmlFor="pr-url">PR URL</label>
+            <input id="pr-url" className="input" onChange={(event) => setPrUrl(event.target.value)} placeholder="https://github.com/org/repo/pull/312" type="url" value={prUrl} />
           </div>
 
           <div className="field-group">
-            <label className="field-label" htmlFor="diff-text">
-              PR Diff
-            </label>
-            <textarea
-              id="diff-text"
-              className="textarea textarea-large"
-              onChange={(event) => setDiffText(event.target.value)}
-              placeholder="Paste the full diff text here..."
-              value={diffText}
-            />
+            <label className="field-label" htmlFor="diff-text">PR Diff</label>
+            <textarea id="diff-text" className="textarea textarea-large" onChange={(event) => setDiffText(event.target.value)} placeholder="Paste the full diff text here..." value={diffText} />
           </div>
 
           <button className="button button-primary button-wide" disabled={loading} type="submit">
@@ -543,10 +403,7 @@ function GovernancePanel({ onNotify }: { onNotify: Notify }): JSX.Element {
               <div className="skeleton skeleton-card" />
             </div>
           ) : error ? (
-            <ErrorPanel
-              title="Governance request failed"
-              copy={error}
-            />
+            <ErrorPanel title="Governance request failed" copy={error} />
           ) : result ? (
             <div className="stack-md">
               <div className="result-header">
@@ -555,12 +412,10 @@ function GovernancePanel({ onNotify }: { onNotify: Notify }): JSX.Element {
                 </span>
                 <span className="metric-chip">{result.has_conflicts ? "Conflicts detected" : "No conflicts detected"}</span>
               </div>
-
               <div className="surface-block">
                 <div className="surface-label">Recommendation</div>
                 <p>{result.comment_text}</p>
               </div>
-
               <div className="surface-block">
                 <div className="surface-label">Conflicts</div>
                 {result.conflicts.length ? (
@@ -572,29 +427,16 @@ function GovernancePanel({ onNotify }: { onNotify: Notify }): JSX.Element {
                           <p>{conflict.explanation}</p>
                         </div>
                         {conflict.decision_url ? (
-                          <a className="chip-link" href={conflict.decision_url} rel="noreferrer" target="_blank">
-                            View source
-                          </a>
+                          <a className="chip-link" href={conflict.decision_url} rel="noreferrer" target="_blank">View source</a>
                         ) : null}
                       </div>
                     ))}
                   </div>
-                ) : (
-                  <p className="muted">No violations were returned for this diff.</p>
-                )}
-              </div>
-
-              <div className="surface-block">
-                <div className="surface-label">Comment Preview</div>
-                <pre className="comment-preview">{result.comment_text}</pre>
+                ) : <p className="muted">No violations were returned for this diff.</p>}
               </div>
             </div>
           ) : (
-            <EmptyPanel
-              eyebrow="Ready for review"
-              title="Run a governance check on a PR diff."
-              copy="Paste a diff to see merge safety, conflict context, and a clean reviewer comment."
-            />
+            <EmptyPanel eyebrow="Ready for review" title="Run a governance check on a PR diff." copy="Paste a diff to see merge safety, conflict context, and a clean reviewer comment." />
           )}
         </div>
       </div>
@@ -612,22 +454,15 @@ function IncidentPanel({ onNotify }: { onNotify: Notify }): JSX.Element {
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-
     if (!alertTitle.trim()) {
       onNotify("error", "Alert title required", "Provide the incident alert title to continue.");
       return;
     }
-
     setLoading(true);
     setError("");
 
     try {
-      const response = await runIncidentAnalysis({
-        alert_title: alertTitle.trim(),
-        service_name: serviceName.trim(),
-        error_snippet: errorSnippet.trim(),
-      });
-
+      const response = await runIncidentAnalysis({ alert_title: alertTitle.trim(), service_name: serviceName.trim(), error_snippet: errorSnippet.trim() });
       setResult(response);
       onNotify("success", "Incident analysis complete", "Structured remediation guidance is ready.");
     } catch (errorValue) {
@@ -651,46 +486,20 @@ function IncidentPanel({ onNotify }: { onNotify: Notify }): JSX.Element {
       </div>
 
       <div className="split-layout">
-        <form className="panel form-panel" onSubmit={(event) => void handleSubmit(event)}>
+        <form className="panel form-panel" onSubmit={handleSubmit}>
           <div className="field-group">
-            <label className="field-label" htmlFor="alert-title">
-              Alert Title
-            </label>
-            <input
-              id="alert-title"
-              className="input"
-              onChange={(event) => setAlertTitle(event.target.value)}
-              placeholder="Payment service spike"
-              type="text"
-              value={alertTitle}
-            />
+            <label className="field-label" htmlFor="alert-title">Alert Title</label>
+            <input id="alert-title" className="input" onChange={(event) => setAlertTitle(event.target.value)} placeholder="Payment service spike" type="text" value={alertTitle} />
           </div>
 
           <div className="field-group">
-            <label className="field-label" htmlFor="service-name">
-              Service Name
-            </label>
-            <input
-              id="service-name"
-              className="input"
-              onChange={(event) => setServiceName(event.target.value)}
-              placeholder="payments"
-              type="text"
-              value={serviceName}
-            />
+            <label className="field-label" htmlFor="service-name">Service Name</label>
+            <input id="service-name" className="input" onChange={(event) => setServiceName(event.target.value)} placeholder="payments" type="text" value={serviceName} />
           </div>
 
           <div className="field-group">
-            <label className="field-label" htmlFor="error-snippet">
-              Error Snippet
-            </label>
-            <textarea
-              id="error-snippet"
-              className="textarea"
-              onChange={(event) => setErrorSnippet(event.target.value)}
-              placeholder="Too many DB connections"
-              value={errorSnippet}
-            />
+            <label className="field-label" htmlFor="error-snippet">Error Snippet</label>
+            <textarea id="error-snippet" className="textarea" onChange={(event) => setErrorSnippet(event.target.value)} placeholder="Too many DB connections" value={errorSnippet} />
           </div>
 
           <button className="button button-primary button-wide" disabled={loading} type="submit">
@@ -707,63 +516,32 @@ function IncidentPanel({ onNotify }: { onNotify: Notify }): JSX.Element {
               <div className="skeleton skeleton-card tall" />
             </div>
           ) : error ? (
-            <ErrorPanel
-              title="Incident request failed"
-              copy={error}
-            />
+            <ErrorPanel title="Incident request failed" copy={error} />
           ) : result ? (
             <div className="stack-md">
               <div className="result-header">
                 <span className={`badge ${severityClass(result.severity)}`}>{result.severity} severity</span>
-                {result.runbook_url ? (
-                  <a className="chip-link" href={result.runbook_url} rel="noreferrer" target="_blank">
-                    Open runbook
-                  </a>
-                ) : null}
+                {result.runbook_url ? <a className="chip-link" href={result.runbook_url} rel="noreferrer" target="_blank">Open runbook</a> : null}
               </div>
-
               <div className="surface-block">
                 <div className="surface-label">Issue</div>
                 <p>{result.issue}</p>
               </div>
-
               <div className="surface-block">
                 <div className="surface-label">Likely Cause</div>
                 <p>{result.likely_cause}</p>
               </div>
-
               <div className="surface-block">
                 <div className="surface-label">Fix Steps</div>
                 {result.fix_steps.length ? (
                   <ol className="ordered-list">
-                    {result.fix_steps.map((step) => (
-                      <li key={step}>{step}</li>
-                    ))}
+                    {result.fix_steps.map((step) => <li key={step}>{step}</li>)}
                   </ol>
-                ) : (
-                  <p className="muted">No fix steps were returned.</p>
-                )}
-              </div>
-
-              <div className="surface-block">
-                <div className="surface-label">Warnings</div>
-                {result.warnings.length ? (
-                  <ul className="bullet-list">
-                    {result.warnings.map((warning) => (
-                      <li key={warning}>{warning}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="muted">No warnings returned.</p>
-                )}
+                ) : <p className="muted">No fix steps were returned.</p>}
               </div>
             </div>
           ) : (
-            <EmptyPanel
-              eyebrow="Ready for incident input"
-              title="Analyze a production signal."
-              copy="Start with the alert title, service, and the strongest error snippet you have."
-            />
+            <EmptyPanel eyebrow="Ready for incident input" title="Analyze a production signal." copy="Start with the alert title, service, and the strongest error snippet you have." />
           )}
         </div>
       </div>
@@ -771,17 +549,7 @@ function IncidentPanel({ onNotify }: { onNotify: Notify }): JSX.Element {
   );
 }
 
-function SettingsPanel({
-  health,
-  onNotify,
-  selectedRepo,
-  setSelectedRepo,
-}: {
-  health: BackendHealth;
-  onNotify: Notify;
-  selectedRepo: string;
-  setSelectedRepo: (value: string) => void;
-}): JSX.Element {
+function SettingsPanel({ health, onNotify, selectedRepo, setSelectedRepo }: { health: BackendHealth; onNotify: Notify; selectedRepo: string; setSelectedRepo: (value: string) => void }): JSX.Element {
   return (
     <section className="page">
       <div className="page-header">
@@ -795,41 +563,15 @@ function SettingsPanel({
       <div className="settings-grid">
         <div className="panel">
           <div className="field-group">
-            <label className="field-label" htmlFor="repo-selector">
-              Repo Selector
-            </label>
-            <input
-              id="repo-selector"
-              className="input"
-              onBlur={() => onNotify("success", "Repository saved", "The active repo context has been updated.")}
-              onChange={(event) => setSelectedRepo(event.target.value)}
-              placeholder="org/repo"
-              type="text"
-              value={selectedRepo}
-            />
+            <label className="field-label" htmlFor="repo-selector">Repo Selector</label>
+            <input id="repo-selector" className="input" onBlur={() => onNotify("success", "Repository saved", "The active repo context has been updated.")} onChange={(event) => setSelectedRepo(event.target.value)} placeholder="org/repo" type="text" value={selectedRepo} />
           </div>
-
           <div className="settings-meta">
-            <div className="meta-chip">
-              <span className="meta-label">Backend</span>
-              <span>{health.label}</span>
-            </div>
             <div className="meta-chip">
               <span className="meta-label">API base</span>
               <span>{apiBaseUrl}</span>
             </div>
-            <div className="meta-chip">
-              <span className="meta-label">Auth</span>
-              <span>{isSupabaseConfigured ? supabaseUrl : "Configure VITE_SUPABASE_URL"}</span>
-            </div>
           </div>
-
-          {health.error ? (
-            <div className="inline-message inline-message-warning">
-              <strong>Backend detail</strong>
-              <p>{health.error}</p>
-            </div>
-          ) : null}
         </div>
 
         {["GitHub Connect", "Organization Memory", "Billing", "Slack Bot"].map((title) => (
@@ -838,10 +580,7 @@ function SettingsPanel({
               <strong>{title}</strong>
               <span className="badge badge-muted">Coming soon</span>
             </div>
-            <p className="muted">
-              Future-ready placeholder aligned to the product surface. The UI is in place without inventing backend
-              behavior.
-            </p>
+            <p className="muted">Future-ready placeholder aligned to the product surface.</p>
           </div>
         ))}
       </div>
@@ -884,28 +623,17 @@ function ToastStack({ toasts }: { toasts: AppToast[] }): JSX.Element {
 
 function getNavGlyph(key: NavKey): string {
   switch (key) {
-    case "chat":
-      return "Q";
-    case "governance":
-      return "G";
-    case "incident":
-      return "I";
-    case "settings":
-      return "S";
-    default:
-      return "D";
+    case "chat": return "Q";
+    case "governance": return "G";
+    case "incident": return "I";
+    case "settings": return "S";
+    default: return "D";
   }
 }
 
 function severityClass(severity: string): string {
-  if (severity === "high") {
-    return "badge-danger";
-  }
-
-  if (severity === "medium") {
-    return "badge-warning";
-  }
-
+  if (severity === "high") return "badge-danger";
+  if (severity === "medium") return "badge-warning";
   return "badge-success";
 }
 
