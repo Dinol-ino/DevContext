@@ -20,4 +20,5 @@ test.js
 test_backend.py
 venv/
 MANUAL.md
+.agents
 >>>>>>> main

@@ -87,9 +87,8 @@ RENDER_DEPLOYMENT_URL=https://your-app.onrender.com
 #### 3. **Start Backend** (Render)
 
 ```bash
-cd agents/
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+pip install -r agents/requirements.txt
+uvicorn agents.main:app --reload --port 8000
 ```
 
 API available at `http://localhost:8000`
@@ -362,8 +361,12 @@ Built for Google Build for AI Hackathon, April 2026.
 - Verify HNSW index exists: `SELECT indexname FROM pg_indexes WHERE tablename = 'node_embeddings';`
 
 **Frontend can't reach backend**
-- Confirm Render URL in `VITE_API_BASE` env var
-- Check CORS headers in FastAPI: `allow_origins=["*"]` for development
+- Confirm frontend env uses `VITE_API_BASE_URL`
+- For local UI development, point to the agents API service (`agents.main`)
+- Keep webhook ingestion service separate (`ingestion.github_webhook`)
+- Confirm CORS allows:
+  - `http://localhost:5173`
+  - `http://127.0.0.1:5173`
 
 **Render service spins down**
 - Free tier auto-hibernates after 15 min of inactivity
@@ -372,5 +375,24 @@ Built for Google Build for AI Hackathon, April 2026.
 **Gemini API returns rate limit error**
 - Free tier: 60 requests per minute
 - Add exponential backoff retry logic in agents
-- For fallback we've used OpenRouter 
-  Backend almost done, some of the shits still to do
+- For fallback we've used OpenRouter
+
+### Local run commands
+
+Use backend for UI routes (`/api/v1/health`, `/api/v1/ask`, `/api/v1/governance/check`, `/api/v1/incident`):
+
+```bash
+uvicorn agents.main:app --reload --port 8000
+```
+
+Use webhook service separately (GitHub ingestion only):
+
+```bash
+uvicorn ingestion.github_webhook:app --reload --port 8001
+```
+
+If port `8000` is already occupied, run agents on `8001` (or another free port) and update:
+
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8001
+```

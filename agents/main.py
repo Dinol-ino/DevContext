@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -12,12 +14,28 @@ except ImportError:
     from incident_agent import router as incident_router
 
 API_PREFIX = "/api/v1"
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+
+def _get_allowed_origins() -> list[str]:
+    configured = os.getenv("FRONTEND_ORIGINS", "")
+    extra_origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+
+    origins: list[str] = []
+    for origin in [*DEFAULT_ALLOWED_ORIGINS, *extra_origins]:
+        if origin not in origins:
+            origins.append(origin)
+
+    return origins
 
 app = FastAPI(title="DevContextIQ API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
