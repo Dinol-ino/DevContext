@@ -43,6 +43,10 @@ def root() -> dict[str, str]:
     return {"name": "DevContextIQ API", "version": "2.0.0"}
 
 
-@app.get(f"{API_PREFIX}/health")
-def health() -> dict[str, str]:
+@app.get("/health")
+def root_health():
+    return {"status": "ok"}
+
+@app.get("/api/v1/health")
+def api_health():
     return {"status": "ok", "version": "2.0.0"}

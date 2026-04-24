@@ -5,4 +5,3 @@ supabase
 httpx
 requests
 pydantic
-openai
