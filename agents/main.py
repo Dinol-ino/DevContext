@@ -19,15 +19,28 @@ API_PREFIX = "/api/v1"
 DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "https://yourapp.vercel.app",
 ]
+
+
+def _normalize_origin(origin: str) -> str:
+    return origin.strip().rstrip("/")
 
 
 def _get_allowed_origins() -> list[str]:
     configured = os.getenv("FRONTEND_ORIGINS", "")
-    extra_origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    extra_origins = [_normalize_origin(origin) for origin in configured.split(",") if origin.strip()]
+    vercel_frontend = _normalize_origin(os.getenv("VERCEL_FRONTEND_URL", ""))
+
+    vercel_runtime_url = _normalize_origin(os.getenv("VERCEL_URL", ""))
+    if vercel_runtime_url and not vercel_runtime_url.startswith(("http://", "https://")):
+        vercel_runtime_url = f"https://{vercel_runtime_url}"
 
     origins: list[str] = []
-    for origin in [*DEFAULT_ALLOWED_ORIGINS, *extra_origins]:
+    for origin in [*DEFAULT_ALLOWED_ORIGINS, *extra_origins, vercel_frontend, vercel_runtime_url]:
+        origin = _normalize_origin(origin)
+        if not origin:
+            continue
         if origin not in origins:
             origins.append(origin)
 
