@@ -34,10 +34,10 @@ ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=False)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
+HF_EMBEDDINGS_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_MODEL = "deepseek/deepseek-chat"
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 768
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_DIMENSIONS = 384
 EMBEDDING_MAX_TEXT_LENGTH = 4000
 RECENT_KEYWORDS = {"recent", "latest", "changed", "change", "updated", "new"}
 DECISION_KEYWORDS = {"decision", "why", "architecture", "architectural", "rationale"}
@@ -120,34 +120,37 @@ def _generate_query_embedding(text: str) -> list[float]:
     if not cleaned:
         return []
 
-    api_key = _clean_text(os.getenv("OPENAI_API_KEY"))
-    if not api_key:
+    hf_token = _clean_text(os.getenv("HF_TOKEN"))
+    if not hf_token:
         return []
 
-    payload = {
-        "model": EMBEDDING_MODEL,
-        "input": cleaned,
-        "dimensions": EMBEDDING_DIMENSIONS,
-    }
+    payload = {"inputs": cleaned}
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {hf_token}",
         "Content-Type": "application/json",
     }
 
     for attempt in range(2):
         try:
             response = requests.post(
-                OPENAI_EMBEDDINGS_URL,
+                HF_EMBEDDINGS_URL,
                 headers=headers,
                 json=payload,
                 timeout=20,
             )
             response.raise_for_status()
             data = response.json()
-            embedding = data.get("data", [{}])[0].get("embedding", [])
-            if not isinstance(embedding, list) or not embedding:
-                return []
-            return [float(value) for value in embedding]
+            if isinstance(data, list) and data and all(isinstance(value, (float, int)) for value in data):
+                return [float(value) for value in data]
+            if (
+                isinstance(data, list)
+                and data
+                and isinstance(data[0], list)
+                and data[0]
+                and all(isinstance(value, (float, int)) for value in data[0])
+            ):
+                return [float(value) for value in data[0]]
+            return []
         except Exception:
             if attempt == 1:
                 return []

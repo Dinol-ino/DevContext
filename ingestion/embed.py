@@ -13,9 +13,9 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 ENV_PATH = BASE_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=False)
 
-OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 768
+HF_EMBEDDINGS_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_DIMENSIONS = 384
 MAX_TEXT_LENGTH = 6000
 TIMEOUT_SECONDS = 20
 MAX_ATTEMPTS = 2
@@ -35,38 +35,45 @@ def generate_embedding(text: str) -> list[float]:
     if not cleaned:
         return []
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        log_warning("OPENAI_API_KEY not configured; embedding skipped.")
+    hf_token = os.getenv("HF_TOKEN", "").strip()
+    if not hf_token:
+        log_warning("HF_TOKEN not configured; embedding skipped.")
         return []
 
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {hf_token}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": EMBEDDING_MODEL,
-        "input": cleaned,
-        "dimensions": EMBEDDING_DIMENSIONS,
-    }
+    payload = {"inputs": cleaned}
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response = requests.post(
-                OPENAI_EMBEDDINGS_URL,
+                HF_EMBEDDINGS_URL,
                 headers=headers,
                 json=payload,
                 timeout=TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             data = response.json()
-            embedding = data.get("data", [{}])[0].get("embedding", [])
-            if not isinstance(embedding, list) or not embedding:
+            embedding: list[float] = []
+            if isinstance(data, list) and data and all(isinstance(value, (float, int)) for value in data):
+                embedding = [float(value) for value in data]
+            elif (
+                isinstance(data, list)
+                and data
+                and isinstance(data[0], list)
+                and data[0]
+                and all(isinstance(value, (float, int)) for value in data[0])
+            ):
+                embedding = [float(value) for value in data[0]]
+
+            if not embedding:
                 return []
-            return [float(value) for value in embedding]
+            return embedding
         except Exception as exc:
             if attempt >= MAX_ATTEMPTS:
-                log_error(f"OpenAI embedding request failed: {exc}")
+                log_error(f"Hugging Face embedding request failed: {exc}")
                 return []
             time.sleep(1)
 
