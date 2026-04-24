@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,9 @@ DEFAULT_MODEL = "deepseek/deepseek-chat"
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 768
 EMBEDDING_MAX_TEXT_LENGTH = 4000
+RECENT_KEYWORDS = {"recent", "latest", "changed", "change", "updated", "new"}
+DECISION_KEYWORDS = {"decision", "why", "architecture", "architectural", "rationale"}
+SERVICE_KEYWORDS = {"gateway", "auth", "db", "api", "frontend"}
 
 
 def _clean_text(value: Any) -> str:
@@ -76,6 +80,10 @@ def _trim_text(text: str, limit: int = EMBEDDING_MAX_TEXT_LENGTH) -> str:
 
 def _current_model() -> str:
     return _clean_text(os.getenv("MODEL_NAME")) or _clean_text(os.getenv("OPENROUTER_MODEL")) or DEFAULT_MODEL
+
+
+def get_used_model() -> str:
+    return _current_model()
 
 
 def call_llm(system_prompt: str, user_prompt: str) -> str:
@@ -172,8 +180,116 @@ def format_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _rank_rows(query: str, rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    return _rank_rows_with_intent(query, rows, intent=None, limit=limit)
+
+
+def _parse_created_at(value: Any) -> datetime | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    candidate = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _freshness_weight(row: dict[str, Any]) -> float:
+    created_at = _parse_created_at(row.get("created_at"))
+    if created_at is None:
+        return 0.1
+
+    now = datetime.now(timezone.utc)
+    age_days = max(0.0, (now - created_at).total_seconds() / 86400.0)
+    if age_days <= 7:
+        return 1.0
+    if age_days <= 30:
+        return 0.8
+    if age_days <= 90:
+        return 0.6
+    if age_days <= 180:
+        return 0.35
+    return 0.15
+
+
+def _infer_query_intent(question: str) -> dict[str, Any]:
+    lowered = _clean_text(question).lower()
+    has_recent_intent = any(keyword in lowered for keyword in RECENT_KEYWORDS)
+    has_decision_intent = any(keyword in lowered for keyword in DECISION_KEYWORDS)
+    matched_services = [service for service in SERVICE_KEYWORDS if service in lowered]
+    return {
+        "recent": has_recent_intent,
+        "decision": has_decision_intent,
+        "services": matched_services,
+    }
+
+
+def _row_text_blobs(row: dict[str, Any]) -> list[str]:
+    label = _normalize_value(row.get("label") or row.get("title"))
+    reason = _normalize_value(_metadata_value(row, "reason"))
+    services = _normalize_value(_metadata_value(row, "services"))
+    chunk = _normalize_value(row.get("chunk"))
+    return [label, reason, services, chunk]
+
+
+def _row_has_exact_match(question: str, row: dict[str, Any]) -> bool:
+    query = _clean_text(question).lower()
+    if not query:
+        return False
+    for blob in _row_text_blobs(row):
+        lowered = blob.lower()
+        if lowered and (query in lowered or lowered in query):
+            return True
+    return False
+
+
+def _service_lexical_search(question: str, services: list[str], limit: int = 8) -> list[dict[str, Any]]:
+    if not services:
+        return []
+
+    rows = fetch_recent_nodes(limit=350)
+    query = _clean_text(question).lower()
+    scored: list[tuple[float, dict[str, Any]]] = []
+
+    for row in rows:
+        label = _normalize_value(row.get("label")).lower()
+        metadata_blob = _normalize_value(row.get("metadata")).lower()
+        score = 0.0
+
+        for service in services:
+            if service in label:
+                score += 3.0
+            if service in metadata_blob:
+                score += 2.0
+
+        if query and query in label:
+            score += 2.0
+
+        if score <= 0:
+            continue
+
+        enriched = dict(row)
+        enriched["_score"] = max(float(enriched.get("_score", 0.0)), round(score, 4))
+        scored.append((score, enriched))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [row for _, row in scored[: max(1, limit)]]
+
+
+def _rank_rows_with_intent(
+    query: str,
+    rows: list[dict[str, Any]],
+    intent: dict[str, Any] | None,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
     query_text = _clean_text(query)
     query_terms = _tokenize(query_text)
+    lowered_query = query_text.lower()
+    intent_data = intent or {"recent": False, "decision": False, "services": []}
+    service_terms = intent_data.get("services") if isinstance(intent_data.get("services"), list) else []
     scored: list[tuple[float, dict[str, Any]]] = []
     seen: set[str] = set()
 
@@ -195,20 +311,39 @@ def _rank_rows(query: str, rows: list[dict[str, Any]], limit: int = 8) -> list[d
         overlap = query_terms.intersection(row_terms)
 
         lexical_score = float(len(overlap))
-        if label and label.lower() in query_text.lower():
+        if label and label.lower() in lowered_query:
             lexical_score += 4.0
-        if query_text.lower() in haystack_lower and query_text:
+        if lowered_query in haystack_lower and lowered_query:
             lexical_score += 2.5
         if services:
             lexical_score += min(2.0, len(query_terms.intersection(_tokenize(services))) * 0.75)
 
         vector_score = float(row.get("_vector_score", 0.0)) * 4.0
-        total_score = lexical_score + vector_score
+        exact_match_bonus = 2.0 if _row_has_exact_match(query_text, row) else 0.0
+        freshness = _freshness_weight(row)
+        freshness_bonus = freshness * (1.8 if intent_data.get("recent") else 0.9)
+        decision_bonus = 0.0
+        if intent_data.get("decision") and node_type.lower() == "decision":
+            decision_bonus = 2.5
+
+        service_bonus = 0.0
+        if service_terms:
+            label_blob = label.lower()
+            reason_blob = reason.lower()
+            metadata_blob = _normalize_value(row.get("metadata")).lower()
+            for term in service_terms:
+                if term in label_blob:
+                    service_bonus += 1.2
+                if term in reason_blob or term in metadata_blob:
+                    service_bonus += 1.0
+
+        total_score = lexical_score + vector_score + exact_match_bonus + freshness_bonus + decision_bonus + service_bonus
         if total_score <= 0:
             continue
 
         enriched = dict(row)
         enriched["_score"] = round(total_score, 4)
+        enriched["_freshness"] = round(freshness, 4)
         scored.append((total_score, enriched))
 
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -246,37 +381,52 @@ def _graph_context(node_ids: list[str]) -> list[dict[str, Any]]:
 
 
 def retrieve_context(question: str) -> dict[str, Any]:
-    lexical_rows = search_nodes(question, limit=6)
+    intent = _infer_query_intent(question)
+    lexical_rows = search_nodes(question, limit=8)
     query_embedding = _generate_query_embedding(question)
     vector_rows = fetch_embedding_matches(query_embedding, limit=6) if query_embedding else []
+    recent_rows = fetch_recent_nodes(limit=10 if intent.get("recent") else 4)
+    decision_rows = fetch_decisions(limit=120) if intent.get("decision") else []
+    decision_focus_rows = _rank_rows_with_intent(question, decision_rows, intent=intent, limit=8) if decision_rows else []
+    service_rows = _service_lexical_search(question, intent.get("services", []), limit=8)
 
     node_ids = [
         _clean_text(row.get("id") or row.get("node_id"))
-        for row in lexical_rows + vector_rows
+        for row in lexical_rows + vector_rows + decision_focus_rows + service_rows
         if _clean_text(row.get("id") or row.get("node_id"))
     ]
 
     graph_rows = _graph_context(node_ids)
-    recent_rows = fetch_recent_nodes(limit=5)
 
-    combined = lexical_rows + vector_rows + graph_rows + recent_rows
-    ranked = _rank_rows(question, combined, limit=8)
+    combined = lexical_rows + vector_rows + decision_focus_rows + service_rows + graph_rows + recent_rows
+    ranked = _rank_rows_with_intent(question, combined, intent=intent, limit=8)
     sources = format_sources(ranked)
-    confidence = compute_confidence(question, ranked)
+    confidence = compute_confidence(question, ranked, intent=intent)
     return {"evidence": ranked, "sources": sources, "confidence": confidence}
 
 
-def compute_confidence(question: str, evidence: list[dict[str, Any]]) -> float:
+def compute_confidence(
+    question: str,
+    evidence: list[dict[str, Any]],
+    intent: dict[str, Any] | None = None,
+) -> float:
     if not evidence:
         return 0.0
 
-    query_terms = _tokenize(question)
-    best_score = max(float(row.get("_score", 0.0)) for row in evidence)
-    vector_hits = sum(1 for row in evidence if float(row.get("_vector_score", 0.0)) > 0)
-    base = min(0.45, len(evidence) * 0.08)
-    lexical = min(0.35, best_score / max(4.0, len(query_terms) * 1.5))
-    vector = min(0.15, vector_hits * 0.05)
-    return round(min(0.95, 0.15 + base + lexical + vector), 2)
+    intent_data = intent or _infer_query_intent(question)
+    considered = evidence[:8]
+
+    evidence_count_score = min(0.34, len(considered) * 0.05)
+    freshness_values = [_freshness_weight(row) for row in considered]
+    freshness_score = min(0.2, (sum(freshness_values) / max(1, len(freshness_values))) * 0.2)
+    exact_matches = sum(1 for row in considered if _row_has_exact_match(question, row))
+    exact_match_score = min(0.24, exact_matches * 0.08)
+    decision_hits = sum(1 for row in considered if _clean_text(row.get("type")).lower() == "decision")
+    decision_multiplier = 0.06 if intent_data.get("decision") else 0.03
+    decision_score = min(0.18 if intent_data.get("decision") else 0.1, decision_hits * decision_multiplier)
+
+    base = 0.1
+    return round(min(0.96, base + evidence_count_score + freshness_score + exact_match_score + decision_score), 2)
 
 
 def detect_conflict(diff_text: str) -> dict[str, Any]:

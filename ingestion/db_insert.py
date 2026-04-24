@@ -155,6 +155,50 @@ def insert_lightweight_event(
     return _insert_node_row("event", clean_label, payload_metadata, source_url)
 
 
+def insert_adr_node(
+    title: str,
+    summary: str,
+    path: str,
+    repo: str,
+    author: str,
+    source_url: str,
+    metadata_extra: dict[str, Any] | None = None,
+) -> str:
+    clean_title = clean_text(title)
+    if not clean_title:
+        raise ValueError("insert_adr_node requires a non-empty title.")
+
+    metadata: dict[str, Any] = {
+        "title": clean_title,
+        "summary": clean_text(summary),
+        "path": clean_text(path),
+        "repo": clean_text(repo),
+        "author": clean_text(author),
+        "event": "adr",
+    }
+    if isinstance(metadata_extra, dict):
+        metadata.update(metadata_extra)
+
+    return _insert_node_row("adr", clean_title, metadata, source_url)
+
+
+def insert_adr_edges(adr_node_id: str, repo: str, author: str) -> None:
+    clean_adr_node_id = clean_text(adr_node_id)
+    if not clean_adr_node_id:
+        raise ValueError("insert_adr_edges requires a non-empty adr_node_id.")
+
+    repo_name = clean_text(repo)
+    author_name = clean_text(author)
+
+    if repo_name:
+        repo_node_id = _get_or_create_node("repo", repo_name)
+        _insert_edge_if_missing(repo_node_id, clean_adr_node_id, "contains_adr")
+
+    if author_name:
+        author_node_id = _get_or_create_node("author", author_name)
+        _insert_edge_if_missing(author_node_id, clean_adr_node_id, "authored_adr")
+
+
 def node_exists(source_url: str, label: str, event_type: str | None = None) -> bool:
     client = _get_supabase_client()
     clean_source_url = clean_text(source_url)

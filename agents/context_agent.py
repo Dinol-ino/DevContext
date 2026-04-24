@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -8,15 +7,14 @@ from pydantic import BaseModel, Field
 
 try:
     from .prompts import CONTEXT_SYSTEM_PROMPT
-    from .tools import call_llm, format_sources, retrieve_context
+    from .tools import call_llm, format_sources, get_used_model, retrieve_context
 except ImportError:
     from prompts import CONTEXT_SYSTEM_PROMPT
-    from tools import call_llm, format_sources, retrieve_context
+    from tools import call_llm, format_sources, get_used_model, retrieve_context
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=False)
 
-USED_MODEL = os.getenv("MODEL_NAME", "").strip() or os.getenv("OPENROUTER_MODEL", "").strip() or "deepseek/deepseek-chat"
 router = APIRouter(tags=["Context"])
 
 
@@ -80,6 +78,7 @@ def _evidence_prompt(evidence: list[dict[str, Any]]) -> str:
 @router.post("/ask", response_model=AskResponse)
 def ask(payload: AskRequest) -> AskResponse:
     try:
+        used_model = get_used_model()
         context = retrieve_context(payload.question)
         evidence = context.get("evidence", [])
         sources = context.get("sources") or format_sources(evidence)
@@ -90,7 +89,7 @@ def ask(payload: AskRequest) -> AskResponse:
                 answer="Insufficient internal context to answer this question.",
                 confidence=0.0,
                 sources=[],
-                used_model=USED_MODEL,
+                used_model=used_model,
             )
 
         llm_answer = call_llm(
@@ -103,7 +102,7 @@ def ask(payload: AskRequest) -> AskResponse:
             answer=answer,
             confidence=confidence,
             sources=sources,
-            used_model=USED_MODEL,
+            used_model=used_model,
         )
     except HTTPException:
         raise

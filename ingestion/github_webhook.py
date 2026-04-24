@@ -12,6 +12,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from .db_insert import (
     get_graph_stats,
+    insert_adr_edges,
+    insert_adr_node,
     insert_edges,
     insert_embedding,
     insert_lightweight_event,
@@ -31,6 +33,12 @@ GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
 TIER1_EVENTS = {"push", "pull_request"}
 TIER2_EVENTS = {"pull_request_review", "pull_request_review_comment", "commit_comment", "repository"}
 TIER3_EVENTS = {"collaborator", "code_scanning_alert"}
+LOW_QUALITY_DECISION_LABELS = {
+    "unable to extract decision",
+    "untitled decision",
+    "parse fallback",
+    "inferred engineering change",
+}
 
 app = FastAPI(title="DevContextIQ Ingestion API", version="1.0.0")
 
@@ -55,6 +63,109 @@ def _safe_source_url(event_name: str, source_url: str, delivery_id: str) -> str:
     if clean_url:
         return clean_url
     return f"event://{event_name or 'unknown'}/{delivery_id or 'unknown'}"
+
+
+def _normalize_decision_label(label: str, fallback: str) -> str:
+    clean_label = clean_text(label)
+    if clean_label:
+        return clean_label[:200]
+    return clean_text(fallback)[:200] or "Engineering change recorded"
+
+
+def _is_low_quality_label(value: str) -> bool:
+    lowered = clean_text(value).lower()
+    return not lowered or lowered in LOW_QUALITY_DECISION_LABELS
+
+
+def _adr_source_url(base_source_url: str, path: str) -> str:
+    source = clean_text(base_source_url)
+    clean_path = clean_text(path)
+    if not source:
+        return f"event://adr/{clean_path or 'unknown'}"
+    if clean_path:
+        return f"{source}#adr:{clean_path}"
+    return source
+
+
+def _normalize_adr_items(raw_items: Any, default_repo: str, default_author: str) -> list[dict[str, str]]:
+    if not isinstance(raw_items, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+
+        path = clean_text(item.get("path"))
+        title = clean_text(item.get("title"))
+        summary = clean_text(item.get("summary"))
+        repo = clean_text(item.get("repo")) or default_repo
+        author = clean_text(item.get("author")) or default_author
+        source_url = clean_text(item.get("source_url"))
+
+        if not path or not title:
+            continue
+        normalized.append(
+            {
+                "path": path,
+                "title": title[:200],
+                "summary": summary[:500],
+                "repo": repo,
+                "author": author,
+                "source_url": source_url,
+            }
+        )
+    return normalized
+
+
+def _insert_adr_nodes(
+    event_name: str,
+    delivery_id: str,
+    event_data: dict[str, Any],
+    default_source_url: str,
+) -> list[str]:
+    repo = clean_text(event_data.get("repo"))
+    author = clean_text(event_data.get("author"))
+    adr_items = _normalize_adr_items(event_data.get("adr_items"), repo, author)
+    if not adr_items:
+        return []
+
+    inserted: list[str] = []
+    for adr in adr_items:
+        adr_source = _adr_source_url(adr.get("source_url") or default_source_url, adr["path"])
+        adr_title = clean_text(adr["title"])
+        if node_exists(adr_source, adr_title, "adr"):
+            continue
+
+        try:
+            adr_node_id = insert_adr_node(
+                title=adr_title,
+                summary=adr.get("summary", ""),
+                path=adr["path"],
+                repo=adr.get("repo", ""),
+                author=adr.get("author", ""),
+                source_url=adr_source,
+                metadata_extra={
+                    "event_type": event_name,
+                    "delivery_id": delivery_id,
+                },
+            )
+            insert_adr_edges(
+                adr_node_id=adr_node_id,
+                repo=adr.get("repo", ""),
+                author=adr.get("author", ""),
+            )
+            chunk = clean_text(f"{adr_title}\n{adr.get('summary', '')}\nPath: {adr.get('path', '')}")
+            if chunk:
+                embedding = generate_embedding(chunk)
+                if embedding:
+                    insert_embedding(node_id=adr_node_id, chunk=chunk, embedding=embedding)
+            inserted.append(adr_node_id)
+            log_step(f"adr inserted node_id={adr_node_id} path={adr['path']}")
+        except Exception as exc:
+            log_warning(f"adr insert skipped path={adr['path']}: {exc}")
+
+    return inserted
 
 
 @app.on_event("startup")
@@ -123,6 +234,7 @@ async def github_webhook(
     source_url = _safe_source_url(event_name, event_data.get("source_url", ""), delivery_id)
     label = clean_text(event_data.get("label"))
     metadata = event_data.get("metadata", {})
+    adr_node_ids: list[str] = []
 
     if event_name in TIER2_EVENTS:
         try:
@@ -148,15 +260,42 @@ async def github_webhook(
             log_warning(f"light processing failed event={event_name}: {exc}")
             return _ignored_event(event_name)
 
+    if event_name == "push":
+        try:
+            adr_node_ids = _insert_adr_nodes(
+                event_name=event_name,
+                delivery_id=delivery_id,
+                event_data=event_data,
+                default_source_url=source_url,
+            )
+            if adr_node_ids:
+                log_info(f"adr nodes processed count={len(adr_node_ids)}")
+        except Exception as exc:
+            log_warning(f"adr processing failed event={event_name}: {exc}")
+
     try:
         summary_text = clean_text(event_data.get("summary_text"))
+        if not summary_text:
+            summary_text = label or "Engineering change"
+
+        decision_hint = clean_text(event_data.get("decision_hint"))
+        reason_hint = clean_text(event_data.get("reason_hint"))
         decision_data = extract_decision(summary_text)
-        decision_label = clean_text(decision_data.get("decision")) or label or "Untitled decision"
+        extracted_label = clean_text(decision_data.get("decision"))
+        decision_label = extracted_label
+        if _is_low_quality_label(decision_label):
+            decision_label = decision_hint or label
+        decision_label = _normalize_decision_label(decision_label, fallback="Engineering change recorded")
         decision_data["decision"] = decision_label
+        if not clean_text(decision_data.get("reason")):
+            decision_data["reason"] = reason_hint or summary_text[:260]
 
         if node_exists(source_url, decision_label, event_name):
             log_info("skipped duplicate event")
-            return {"duplicate": True}
+            response: dict[str, Any] = {"duplicate": True}
+            if adr_node_ids:
+                response["adr_node_ids"] = adr_node_ids
+            return response
 
         node_id = insert_node(
             data=decision_data,
@@ -187,13 +326,24 @@ async def github_webhook(
             log_warning(f"embedding flow failed node_id={node_id}: {exc}")
 
         log_info(f"processed {event_name} node inserted")
-        return {
+        response = {
             "received": True,
             "processed": True,
             "event": event_name,
             "node_id": node_id,
             "decision": decision_data,
         }
+        if adr_node_ids:
+            response["adr_node_ids"] = adr_node_ids
+        return response
     except Exception as exc:
         log_warning(f"tier1 processing failed event={event_name}: {exc}")
+        if adr_node_ids:
+            return {
+                "received": True,
+                "processed": True,
+                "mode": "adr_only",
+                "event": event_name,
+                "adr_node_ids": adr_node_ids,
+            }
         return _ignored_event(event_name)

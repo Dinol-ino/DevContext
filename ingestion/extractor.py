@@ -1,8 +1,7 @@
-import json
 import os
 import re
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import requests
@@ -18,9 +17,15 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 ALLOWED_KEYS = ("decision", "reason", "services", "risk")
 OPENROUTER_TIMEOUT_SECONDS = 30
 OPENROUTER_RETRIES = 2
+LOW_QUALITY_DECISIONS = {
+    "unable to extract decision",
+    "untitled decision",
+    "parse fallback",
+    "inferred engineering change",
+}
 
 
-def _fallback(reason: str, decision: str = "Unable to extract decision") -> dict[str, Any]:
+def _fallback(reason: str, decision: str = "Inferred engineering change") -> dict[str, Any]:
     return {
         "decision": _normalize_label(decision),
         "reason": clean_text(reason),
@@ -62,13 +67,16 @@ def _sanitize_output(data: dict[str, Any]) -> dict[str, Any]:
     missing = [key for key in ALLOWED_KEYS if key not in out or out[key] in ("", None)]
     if missing:
         if "decision" in missing:
-            out["decision"] = _normalize_label("Unable to extract decision")
+            out["decision"] = _normalize_label("Inferred engineering change")
         if "reason" in missing:
             out["reason"] = "Missing required keys from model output."
         if "services" in missing:
             out["services"] = []
         if "risk" in missing:
             out["risk"] = "unknown"
+
+    if clean_text(out.get("decision")).lower() in LOW_QUALITY_DECISIONS:
+        out["decision"] = _normalize_label("Inferred engineering change")
 
     return {key: out[key] for key in ALLOWED_KEYS}
 
@@ -91,19 +99,118 @@ def _payload_sender(payload: dict[str, Any]) -> str:
     return clean_text(sender.get("login") or sender.get("name"))
 
 
+def _normalize_path(path: Any) -> str:
+    text = clean_text(path).replace("\\", "/").strip("/")
+    return text
+
+
+def _is_adr_path(path: Any) -> bool:
+    normalized = _normalize_path(path).lower()
+    if not normalized:
+        return False
+    if normalized.startswith("docs/adr/"):
+        return True
+    if normalized.startswith("adr/"):
+        return True
+    return PurePosixPath(normalized).name == "adr.md"
+
+
+def _commit_message_summary(messages: list[str], max_len: int = 160) -> str:
+    if not messages:
+        return "Repository updates"
+    first = clean_text(messages[0].split("\n", 1)[0])
+    if len(first) > max_len:
+        first = first[:max_len].rstrip()
+    if len(messages) == 1:
+        return first
+    return f"{first} (+{len(messages) - 1} more commits)"
+
+
+def _summarize_text(text: str, max_len: int = 240) -> str:
+    summarized = clean_text(text)
+    if len(summarized) <= max_len:
+        return summarized
+    return summarized[:max_len].rstrip() + "..."
+
+
+def _derive_adr_title(path: str, commit_message: str) -> str:
+    normalized = _normalize_path(path)
+    filename = PurePosixPath(normalized).stem
+    cleaned = re.sub(r"^adr[-_ ]*\d*[-_ ]*", "", filename, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[-_]+", " ", cleaned).strip()
+
+    if not cleaned or cleaned.lower() == "adr":
+        first_line = clean_text(commit_message).split("\n", 1)[0]
+        cleaned = re.sub(r"^adr[:\-\s]*", "", first_line, flags=re.IGNORECASE).strip() or normalized
+
+    return _normalize_label(f"ADR: {cleaned}")
+
+
+def _extract_push_adr_items(
+    commits: list[dict[str, Any]],
+    repo: str,
+    author: str,
+    fallback_source_url: str,
+) -> list[dict[str, Any]]:
+    adr_items: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    for commit in commits:
+        if not isinstance(commit, dict):
+            continue
+        commit_message = clean_text(commit.get("message"))
+        commit_url = clean_text(commit.get("url")) or fallback_source_url
+        for key in ("added", "modified"):
+            raw_paths = commit.get(key) or []
+            if not isinstance(raw_paths, list):
+                continue
+            for path in raw_paths:
+                normalized_path = _normalize_path(path)
+                if not normalized_path or normalized_path.lower() in seen_paths:
+                    continue
+                if not _is_adr_path(normalized_path):
+                    continue
+                seen_paths.add(normalized_path.lower())
+                title = _derive_adr_title(normalized_path, commit_message)
+                summary = _summarize_text(
+                    f"{commit_message or 'ADR document updated'} | File: {normalized_path}",
+                    max_len=260,
+                )
+                adr_items.append(
+                    {
+                        "title": title,
+                        "summary": summary,
+                        "path": normalized_path,
+                        "repo": repo,
+                        "author": author,
+                        "source_url": commit_url,
+                    }
+                )
+
+    return adr_items
+
+
 def _parse_push(payload: dict[str, Any]) -> dict[str, Any]:
     ref = clean_text(payload.get("ref"))
     branch = ref.split("/")[-1] if ref else "unknown"
-    commits = payload.get("commits") or []
-    messages = [clean_text(commit.get("message")) for commit in commits if clean_text(commit.get("message"))][:5]
+    commits_raw = payload.get("commits") or []
+    commits = commits_raw if isinstance(commits_raw, list) else []
+    messages = [
+        clean_text(commit.get("message"))
+        for commit in commits
+        if isinstance(commit, dict) and clean_text(commit.get("message"))
+    ][:8]
 
     repo = _payload_repo(payload)
     author = clean_text((payload.get("pusher") or {}).get("name")) or _payload_sender(payload)
     source_url = clean_text(payload.get("compare")) or clean_text((payload.get("head_commit") or {}).get("url"))
-    label = _normalize_label(f"Push to {branch} ({len(commits)} commit{'s' if len(commits) != 1 else ''})")
+    commit_summary = _commit_message_summary(messages)
+    label = _normalize_label(f"Push update: {commit_summary}")
+    adr_items = _extract_push_adr_items(commits, repo, author, source_url)
     summary = (
         f"Event: push\nRepo: {repo}\nBranch: {branch}\nAuthor: {author}\n"
-        f"Commits: {len(commits)}\nMessages: {' | '.join(messages) if messages else 'none'}"
+        f"Commits: {len(commits)}\nCommit summary: {commit_summary}\n"
+        f"Messages: {' | '.join(messages[:5]) if messages else 'none'}"
     )
 
     return {
@@ -114,11 +221,16 @@ def _parse_push(payload: dict[str, Any]) -> dict[str, Any]:
         "author": author,
         "services": [],
         "summary_text": summary,
+        "decision_hint": label,
+        "reason_hint": _summarize_text(summary, max_len=260),
+        "adr_items": adr_items,
         "metadata": {
             "event": "push",
             "branch": branch,
             "commit_count": len(commits),
             "commit_messages": messages,
+            "commit_summary": commit_summary,
+            "adr_count": len(adr_items),
         },
     }
 
@@ -135,10 +247,16 @@ def _parse_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
     author = clean_text((pr.get("user") or {}).get("login")) or _payload_sender(payload)
     source_url = clean_text(pr.get("html_url"))
     number = pr.get("number")
-    label = _normalize_label(f"{title} [{state}]")
+    body_summary = _summarize_text(body, max_len=260)
+    if state == "merged":
+        label = _normalize_label(f"PR merged: {title}")
+        decision_hint = _normalize_label(f"PR merge decision: {title}")
+    else:
+        label = _normalize_label(f"{title} [{state}]")
+        decision_hint = _normalize_label(f"PR update: {title}")
     summary = (
         f"Event: pull_request\nRepo: {repo}\nState: {state}\nTitle: {title}\n"
-        f"Author: {author}\nBody: {body}\nURL: {source_url}"
+        f"Author: {author}\nBody summary: {body_summary or 'none'}\nURL: {source_url}"
     )
 
     return {
@@ -149,12 +267,16 @@ def _parse_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
         "author": author,
         "services": [],
         "summary_text": summary,
+        "decision_hint": decision_hint,
+        "reason_hint": body_summary or f"Pull request {state}: {title}",
         "metadata": {
             "event": "pull_request",
             "action": action,
             "state": state,
             "merged": merged,
             "number": number,
+            "title": title,
+            "body_summary": body_summary,
         },
     }
 
@@ -359,7 +481,7 @@ def extract_decision(pr_text: str) -> dict:
     parsed = safe_json(cleaned)
     if not parsed:
         log_error("Decision extraction failed: invalid JSON from model.")
-        return _fallback("Unable to parse model output as JSON.", decision="Parse fallback")
+        return _fallback("Unable to parse model output as JSON.")
 
     # no hallucinated fields: explicitly keep only the required schema keys
     sanitized = _sanitize_output(parsed)
