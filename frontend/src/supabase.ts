@@ -1,5 +1,4 @@
 import { createClient, type AuthChangeEvent, type Session, type User } from "@supabase/supabase-js";
-
 import type { UserProfile } from "./types";
 
 export const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim() ?? "";
@@ -35,63 +34,50 @@ function mapUser(user: User): UserProfile {
 }
 
 export async function getCurrentUser(): Promise<UserProfile | null> {
-  if (!supabase) {
-    return null;
-  }
-
+  if (!supabase) return null;
   const { data, error } = await supabase.auth.getUser();
-  if (error || !data.user) {
-    return null;
-  }
+  if (error || !data.user) return null;
   return mapUser(data.user);
 }
 
 export function subscribeToAuthChanges(
   callback: (user: UserProfile | null, event: AuthChangeEvent, session: Session | null) => void,
 ): () => void {
-  if (!supabase) {
-    return () => undefined;
-  }
-
+  if (!supabase) return () => undefined;
   const { data } = supabase.auth.onAuthStateChange((event, session) => {
     callback(session?.user ? mapUser(session.user) : null, event, session);
   });
-
   return () => {
     data.subscription.unsubscribe();
   };
 }
 
 export async function signInWithGoogle(): Promise<{ ok: boolean; error?: string }> {
-  if (!supabase) {
-    return {
-      ok: false,
-      error: "Supabase auth is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.",
-    };
-  }
-
+  if (!supabase) return { ok: false, error: "Supabase auth is not configured." };
   const { error } = await supabase.auth.signInWithOAuth({
     provider: "google",
-    options: {
-      redirectTo: window.location.href,
-      queryParams: {
-        access_type: "offline",
-        prompt: "consent",
-      },
-    },
+    options: { redirectTo: window.location.href, queryParams: { access_type: "offline", prompt: "consent" } },
   });
-
-  if (error) {
-    return { ok: false, error: error.message };
-  }
-
+  if (error) return { ok: false, error: error.message };
   return { ok: true };
 }
 
 export async function signOutUser(): Promise<void> {
-  if (!supabase) {
-    return;
-  }
-
+  if (!supabase) return;
   await supabase.auth.signOut();
+}
+
+// --- NEW: Email Auth Functions ---
+export async function signInWithEmail(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
+  if (!supabase) return { ok: false, error: "Supabase auth is not configured." };
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+export async function signUpWithEmail(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
+  if (!supabase) return { ok: false, error: "Supabase auth is not configured." };
+  const { error } = await supabase.auth.signUp({ email, password });
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
 }
