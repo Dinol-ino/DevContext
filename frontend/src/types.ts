@@ -66,6 +66,22 @@ export interface IncidentResponse {
   runbook_url?: string;
 }
 
+export interface AuthEventRequest {
+  event_type: "register" | "login";
+  email: string;
+  user_id?: string;
+  provider?: string;
+  source?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AuthEventResponse {
+  status: string;
+  event_id?: string;
+  event_type: string;
+  email: string;
+}
+
 export interface UserProfile {
   id: string;
   email: string;

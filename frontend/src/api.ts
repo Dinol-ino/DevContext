@@ -1,4 +1,6 @@
 import type {
+  AuthEventRequest,
+  AuthEventResponse,
   ApiSource,
   AskRequest,
   AskResponse,
@@ -268,5 +270,22 @@ export async function runIncidentAnalysis(payload: IncidentRequest): Promise<Inc
     warnings: Array.isArray(raw.warnings) ? raw.warnings.filter((value): value is string => typeof value === "string") : [],
     severity: typeof raw.severity === "string" ? raw.severity : "low",
     runbook_url: typeof raw.runbook_url === "string" ? raw.runbook_url : undefined,
+  };
+}
+
+export async function recordAuthEvent(payload: AuthEventRequest): Promise<AuthEventResponse> {
+  const raw = await request<Record<string, unknown>>("/auth/log", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return {
+    status: typeof raw.status === "string" ? raw.status : "unknown",
+    event_id: typeof raw.event_id === "string" ? raw.event_id : undefined,
+    event_type: typeof raw.event_type === "string" ? raw.event_type : payload.event_type,
+    email: typeof raw.email === "string" ? raw.email : payload.email,
   };
 }

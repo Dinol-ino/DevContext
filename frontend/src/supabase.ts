@@ -1,4 +1,5 @@
 import { createClient, type AuthChangeEvent, type Session, type User } from "@supabase/supabase-js";
+import { recordAuthEvent } from "./api";
 import type { UserProfile } from "./types";
 
 export const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim() ?? "";
@@ -68,16 +69,35 @@ export async function signOutUser(): Promise<void> {
 }
 
 // --- NEW: Email Auth Functions ---
+async function logAuthEvent(eventType: "register" | "login", user: User | null, email: string): Promise<void> {
+  const resolvedEmail = (user?.email ?? email).trim().toLowerCase();
+  if (!resolvedEmail) return;
+
+  try {
+    await recordAuthEvent({
+      event_type: eventType,
+      user_id: user?.id,
+      email: resolvedEmail,
+      provider: "email",
+      source: "frontend",
+    });
+  } catch (error) {
+    console.warn("Failed to write auth event to backend:", error);
+  }
+}
+
 export async function signInWithEmail(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
   if (!supabase) return { ok: false, error: "Supabase auth is not configured." };
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) return { ok: false, error: error.message };
+  await logAuthEvent("login", data.user ?? null, email);
   return { ok: true };
 }
 
 export async function signUpWithEmail(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
   if (!supabase) return { ok: false, error: "Supabase auth is not configured." };
-  const { error } = await supabase.auth.signUp({ email, password });
+  const { data, error } = await supabase.auth.signUp({ email, password });
   if (error) return { ok: false, error: error.message };
+  await logAuthEvent("register", data.user ?? null, email);
   return { ok: true };
 }

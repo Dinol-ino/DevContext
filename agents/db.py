@@ -7,6 +7,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
@@ -29,6 +30,16 @@ def _normalize_value(value: Any) -> str:
     if isinstance(value, dict):
         return " ".join(_clean_text(item) for item in value.values() if _clean_text(item))
     return _clean_text(value)
+
+
+def _normalize_uuid(value: Any) -> str | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    try:
+        return str(UUID(text))
+    except (TypeError, ValueError):
+        return None
 
 
 def _tokenize(text: str) -> set[str]:
@@ -295,3 +306,48 @@ def fetch_incidents(limit: int = 200) -> list[dict[str, Any]]:
         ):
             results.append(row)
     return results
+
+
+def log_user_auth_event(
+    *,
+    event_type: str,
+    email: str,
+    user_id: str | None = None,
+    provider: str = "email",
+    source: str = "frontend",
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    client = get_client()
+    if client is None:
+        raise RuntimeError("Supabase is not configured on the backend.")
+
+    clean_event_type = _clean_text(event_type).lower()
+    if clean_event_type not in {"register", "login"}:
+        raise ValueError("event_type must be either 'register' or 'login'.")
+
+    clean_email = _clean_text(email).lower()
+    if not clean_email:
+        raise ValueError("email is required.")
+
+    payload = {
+        "user_id": _normalize_uuid(user_id),
+        "email": clean_email,
+        "auth_event": clean_event_type,
+        "auth_provider": _clean_text(provider) or "email",
+        "auth_source": _clean_text(source) or "frontend",
+        "ip_address": _clean_text(ip_address) or None,
+        "user_agent": _clean_text(user_agent) or None,
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+    try:
+        response = client.table("user_auth_events").insert(payload).execute()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to insert auth event: {exc}") from exc
+
+    data = response.data or []
+    if data:
+        return data[0]
+    return payload

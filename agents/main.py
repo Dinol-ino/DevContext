@@ -5,10 +5,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 try:
+    from .auth_agent import router as auth_router
     from .context_agent import router as context_router
     from .governance_agent import router as gov_router
     from .incident_agent import router as incident_router
 except ImportError:
+    from auth_agent import router as auth_router
     from context_agent import router as context_router
     from governance_agent import router as gov_router
     from incident_agent import router as incident_router
@@ -44,6 +46,7 @@ app.add_middleware(
 app.include_router(context_router, prefix=API_PREFIX)
 app.include_router(gov_router, prefix=API_PREFIX)
 app.include_router(incident_router, prefix=API_PREFIX)
+app.include_router(auth_router, prefix=API_PREFIX)
 
 
 @app.exception_handler(HTTPException)
