@@ -34,7 +34,6 @@ ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=False)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-HF_EMBEDDINGS_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_MODEL = "deepseek/deepseek-chat"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIMENSIONS = 384
@@ -115,48 +114,40 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
         return ""
 
 
+def _get_embedding_model():
+    """Return a cached local SentenceTransformer instance."""
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        return SentenceTransformer(EMBEDDING_MODEL)
+    except Exception:
+        return None
+
+
+# Cache at module level so the model loads once per process
+_EMBEDDING_MODEL_CACHE: list = []  # holds [model] or [] when unavailable
+
+
+def _get_cached_model():
+    if not _EMBEDDING_MODEL_CACHE:
+        m = _get_embedding_model()
+        _EMBEDDING_MODEL_CACHE.append(m)
+    return _EMBEDDING_MODEL_CACHE[0]
+
+
 def _generate_query_embedding(text: str) -> list[float]:
     cleaned = _trim_text(text)
     if not cleaned:
         return []
 
-    hf_token = _clean_text(os.getenv("HF_TOKEN"))
-    if not hf_token:
+    model = _get_cached_model()
+    if model is None:
         return []
 
-    payload = {"inputs": cleaned}
-    headers = {
-        "Authorization": f"Bearer {hf_token}",
-        "Content-Type": "application/json",
-    }
-
-    for attempt in range(2):
-        try:
-            response = requests.post(
-                HF_EMBEDDINGS_URL,
-                headers=headers,
-                json=payload,
-                timeout=20,
-            )
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, list) and data and all(isinstance(value, (float, int)) for value in data):
-                return [float(value) for value in data]
-            if (
-                isinstance(data, list)
-                and data
-                and isinstance(data[0], list)
-                and data[0]
-                and all(isinstance(value, (float, int)) for value in data[0])
-            ):
-                return [float(value) for value in data[0]]
-            return []
-        except Exception:
-            if attempt == 1:
-                return []
-            time.sleep(1)
-
-    return []
+    try:
+        vector = model.encode(cleaned, normalize_embeddings=True)
+        return [float(v) for v in vector]
+    except Exception:
+        return []
 
 
 def format_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -180,6 +171,9 @@ def format_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
 
     return sources
+
+
+
 
 
 def _rank_rows(query: str, rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:

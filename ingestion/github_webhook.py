@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from .db_insert import (
+    delivery_exists,
     get_graph_stats,
     insert_adr_edges,
     insert_adr_node,
@@ -199,6 +200,11 @@ async def github_webhook(
     event_name = clean_text(x_github_event).lower()
     delivery_id = clean_text(x_github_delivery)
     log_info(f"received event={event_name or 'unknown'} delivery={delivery_id or 'unknown'}")
+
+    if delivery_id and delivery_exists(delivery_id):
+        log_info(f"skipped duplicate delivery_id={delivery_id}")
+        return {"duplicate": True, "delivery_id": delivery_id}
+
 
     if not GITHUB_WEBHOOK_SECRET:
         log_error("webhook secret missing from environment")

@@ -1,7 +1,9 @@
+import re
 from typing import Any, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 try:
     from .db import log_user_auth_event
@@ -18,6 +20,27 @@ class AuthEventRequest(BaseModel):
     provider: str = Field(default="email", examples=["email"])
     source: str = Field(default="frontend", examples=["frontend"])
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        val = v.strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", val):
+            raise ValueError("Invalid email format")
+        return val
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        val = v.strip()
+        try:
+            UUID(val)
+        except ValueError:
+            raise ValueError("user_id must be a valid UUID format")
+        return val
+
 
 
 class AuthEventResponse(BaseModel):

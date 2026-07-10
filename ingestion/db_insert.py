@@ -41,10 +41,12 @@ def _get_supabase_client() -> Client:
         raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be configured.")
 
     try:
-        return create_client(url, key)
+        from supabase import ClientOptions
+        return create_client(url, key, options=ClientOptions(postgrest_client_timeout=5))
     except Exception as exc:
         log_error(f"Supabase client initialization failed: {exc}")
         raise RuntimeError(f"Failed to initialize Supabase client: {exc}") from exc
+
 
 
 def _insert_node_row(node_type: str, label: str, metadata: dict[str, Any], source_url: str = "") -> str:
@@ -234,6 +236,26 @@ def node_exists(source_url: str, label: str, event_type: str | None = None) -> b
             if existing_event == clean_event:
                 return True
     return False
+
+
+def delivery_exists(delivery_id: str) -> bool:
+    client = _get_supabase_client()
+    clean_id = clean_text(delivery_id)
+    if not clean_id:
+        return False
+    try:
+        result = (
+            client.table("nodes")
+            .select("id")
+            .eq("metadata->>delivery_id", clean_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+    except Exception as exc:
+        log_warning(f"Delivery ID lookup failed: {exc}")
+        return False
+
 
 
 def get_graph_stats() -> dict[str, Any]:

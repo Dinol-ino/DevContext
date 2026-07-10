@@ -1,8 +1,18 @@
 import os
+import time
+import logging
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("devcontextiq.agents")
 
 try:
     from .auth_agent import router as auth_router
@@ -17,9 +27,9 @@ except ImportError:
 
 API_PREFIX = "/api/v1"
 DEFAULT_ALLOWED_ORIGINS = [
+    "https://dev-context.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://yourapp.vercel.app",
 ]
 
 
@@ -30,14 +40,9 @@ def _normalize_origin(origin: str) -> str:
 def _get_allowed_origins() -> list[str]:
     configured = os.getenv("FRONTEND_ORIGINS", "")
     extra_origins = [_normalize_origin(origin) for origin in configured.split(",") if origin.strip()]
-    vercel_frontend = _normalize_origin(os.getenv("VERCEL_FRONTEND_URL", ""))
-
-    vercel_runtime_url = _normalize_origin(os.getenv("VERCEL_URL", ""))
-    if vercel_runtime_url and not vercel_runtime_url.startswith(("http://", "https://")):
-        vercel_runtime_url = f"https://{vercel_runtime_url}"
 
     origins: list[str] = []
-    for origin in [*DEFAULT_ALLOWED_ORIGINS, *extra_origins, vercel_frontend, vercel_runtime_url]:
+    for origin in [*DEFAULT_ALLOWED_ORIGINS, *extra_origins]:
         origin = _normalize_origin(origin)
         if not origin:
             continue
@@ -47,6 +52,36 @@ def _get_allowed_origins() -> list[str]:
     return origins
 
 app = FastAPI(title="DevContextIQ API", version="2.0.0")
+
+
+@app.on_event("startup")
+def validate_configuration() -> None:
+    logger.info("Verifying configuration and environment variables...")
+    required = ["SUPABASE_URL", "OPENROUTER_API_KEY"]
+    missing = [var for var in required if not os.getenv(var)]
+    
+    # Check either SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY is present
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    if not supabase_key:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY")
+        
+    if missing:
+        msg = f"Critical Startup Error: Missing required env vars: {', '.join(missing)}"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    logger.info("All required environment variables verified successfully.")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    logger.info(
+        f"Request: {request.method} {request.url.path} - Status: {response.status_code} - Duration: {duration:.4f}s"
+    )
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,6 +115,7 @@ def root() -> dict[str, str]:
 @app.get("/health")
 def root_health():
     return {"status": "ok"}
+
 
 @app.get("/api/v1/health")
 def api_health():

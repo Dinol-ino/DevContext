@@ -2,15 +2,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field, field_validator
 
 try:
     from .prompts import CONTEXT_SYSTEM_PROMPT
     from .tools import call_llm, format_sources, get_used_model, retrieve_context
+    from .auth_utils import get_current_user
 except ImportError:
     from prompts import CONTEXT_SYSTEM_PROMPT
     from tools import call_llm, format_sources, get_used_model, retrieve_context
+    from auth_utils import get_current_user
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=False)
@@ -20,6 +22,15 @@ router = APIRouter(tags=["Context"])
 
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, examples=["Why was gateway rate limiting introduced?"])
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, v: str) -> str:
+        val = v.strip()
+        if not val:
+            raise ValueError("question cannot be empty or only whitespace")
+        return val
+
 
 
 class Source(BaseModel):
@@ -76,7 +87,8 @@ def _evidence_prompt(evidence: list[dict[str, Any]]) -> str:
 
 
 @router.post("/ask", response_model=AskResponse)
-def ask(payload: AskRequest) -> AskResponse:
+def ask(payload: AskRequest, current_user: dict = Depends(get_current_user)) -> AskResponse:
+
     try:
         used_model = get_used_model()
         context = retrieve_context(payload.question)

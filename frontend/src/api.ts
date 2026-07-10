@@ -11,12 +11,14 @@ import type {
   IncidentRequest,
   IncidentResponse,
 } from "./types";
+import { getSessionToken } from "./supabase";
 
 const API_TIMEOUT_MS = 15000;
 const API_PREFIX = "/api/v1";
-const LOCAL_BACKEND_ORIGIN = "http://127.0.0.1:8000";
-const PRODUCTION_BACKEND_ORIGIN = "https://devcontext-backend-agents.onrender.com";
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
+const RENDER_SLEEP_STATUSES = new Set([502, 503, 504]);
+const ERROR_API_NOT_CONFIGURED =
+  "Frontend API is not configured. Set VITE_API_BASE_URL in your deployment environment variables.";
+
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
@@ -32,12 +34,14 @@ function joinUrl(base: string, path: string): string {
 
 function resolveApiBaseUrl(): string {
   const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim();
-  const defaultOrigin =
-    typeof window !== "undefined" && LOCAL_HOSTS.has(window.location.hostname)
-      ? LOCAL_BACKEND_ORIGIN
-      : PRODUCTION_BACKEND_ORIGIN;
-  const chosenBase = configuredBase || defaultOrigin;
-  const normalizedBase = stripTrailingSlash(chosenBase);
+  if (!configuredBase) {
+    return "";
+  }
+
+  const normalizedBase = stripTrailingSlash(configuredBase);
+  if (!normalizedBase) {
+    return "";
+  }
 
   if (normalizedBase.endsWith(API_PREFIX)) {
     return normalizedBase;
@@ -47,6 +51,7 @@ function resolveApiBaseUrl(): string {
 }
 
 export const apiBaseUrl = resolveApiBaseUrl();
+export const isApiBaseConfigured = Boolean(apiBaseUrl);
 
 function extractErrorDetail(parsed: unknown, status: number): string {
   if (parsed && typeof parsed === "object") {
@@ -72,6 +77,10 @@ function extractErrorDetail(parsed: unknown, status: number): string {
     }
   }
 
+  if (RENDER_SLEEP_STATUSES.has(status)) {
+    return "Backend is starting or temporarily unavailable. Wait a few seconds and retry.";
+  }
+
   if (status >= 500) {
     return "The backend returned an internal error. Try again in a moment.";
   }
@@ -84,19 +93,30 @@ function extractErrorDetail(parsed: unknown, status: number): string {
 }
 
 async function request<TResponse>(path: string, init: RequestInit = {}): Promise<TResponse> {
+  if (!isApiBaseConfigured) {
+    throw new Error(ERROR_API_NOT_CONFIGURED);
+  }
+
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
   const url = joinUrl(apiBaseUrl, path);
 
   try {
+    const token = await getSessionToken();
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      ...(init.headers as Record<string, string> ?? {}),
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
     const response = await fetch(url, {
       ...init,
-      headers: {
-        Accept: "application/json",
-        ...(init.headers ?? {}),
-      },
+      headers,
       signal: controller.signal,
     });
+
 
     if (response.status === 204) {
       return null as TResponse;
@@ -119,11 +139,13 @@ async function request<TResponse>(path: string, init: RequestInit = {}): Promise
     return parsed as TResponse;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("The backend did not respond in time. It may be waking up on Render.");
+      throw new Error("Backend request timed out. Render may be waking the service; retry in a few seconds.");
     }
 
     if (error instanceof TypeError) {
-      throw new Error(`Unable to reach the backend at ${apiBaseUrl}. Check the API base URL and CORS settings.`);
+      throw new Error(
+        `Unable to reach backend at ${apiBaseUrl}. Verify VITE_API_BASE_URL, Render service health, and backend CORS origins.`,
+      );
     }
 
     throw error instanceof Error ? error : new Error("Unexpected API error.");

@@ -101,3 +101,11 @@ export async function signUpWithEmail(email: string, password: string): Promise<
   await logAuthEvent("register", data.user ?? null, email);
   return { ok: true };
 }
+
+export async function getSessionToken(): Promise<string | null> {
+  if (!supabase) return null;
+  const { data, error } = await supabase.auth.getSession();
+  if (error || !data.session) return null;
+  return data.session.access_token;
+}
+

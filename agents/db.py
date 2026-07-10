@@ -95,9 +95,14 @@ def get_client() -> Client | None:
     if not url or not key:
         return None
     try:
-        return create_client(url, key)
+        import httpx
+        from supabase import ClientOptions
+        timeout = httpx.Timeout(connect=4.0, read=8.0, write=8.0, pool=4.0)
+        http_client = httpx.Client(timeout=timeout)
+        return create_client(url, key, options=ClientOptions(httpx_client=http_client, postgrest_client_timeout=8))
     except Exception:
         return None
+
 
 
 def get_supabase_client() -> Client | None:

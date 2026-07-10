@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE TABLE IF NOT EXISTS node_embeddings (
     node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     chunk TEXT NOT NULL,
-    embedding vector(768) NOT NULL,
+    embedding vector(384) NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS user_auth_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label);
+CREATE INDEX IF NOT EXISTS idx_nodes_type  ON nodes(type);
 CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_edges ON edges(from_node_id, to_node_id, relation);
 CREATE INDEX IF NOT EXISTS idx_node_embeddings_hnsw ON node_embeddings USING hnsw (embedding vector_cosine_ops);

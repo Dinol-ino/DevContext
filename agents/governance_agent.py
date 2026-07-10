@@ -1,18 +1,28 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field, field_validator
 
 try:
     from .prompts import GOVERNANCE_SYSTEM_PROMPT
     from .tools import call_llm, detect_conflict
+    from .auth_utils import get_current_user
 except ImportError:
     from prompts import GOVERNANCE_SYSTEM_PROMPT
     from tools import call_llm, detect_conflict
+    from auth_utils import get_current_user
 
 router = APIRouter(tags=["Governance"])
 
 
 class GovernanceCheckRequest(BaseModel):
     diff_text: str = Field(..., min_length=1, examples=["removed gateway rate limiting and moved auth checks"])
+
+    @field_validator("diff_text")
+    @classmethod
+    def validate_diff_text(cls, v: str) -> str:
+        val = v.strip()
+        if not val:
+            raise ValueError("diff_text cannot be empty or only whitespace")
+        return val
 
 
 class GovernanceCheckResponse(BaseModel):
@@ -24,7 +34,7 @@ class GovernanceCheckResponse(BaseModel):
 
 
 @router.post("/governance/check", response_model=GovernanceCheckResponse)
-def check(payload: GovernanceCheckRequest) -> GovernanceCheckResponse:
+def check(payload: GovernanceCheckRequest, current_user: dict = Depends(get_current_user)) -> GovernanceCheckResponse:
     try:
         result = detect_conflict(payload.diff_text)
 
