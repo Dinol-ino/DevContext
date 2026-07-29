@@ -5,3 +5,6 @@ supabase
 httpx
 requests
 pydantic
+slowapi
+sentence-transformers
+GitPython

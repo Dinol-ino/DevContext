@@ -43,3 +43,28 @@ def get_current_user(
         raise HTTPException(status_code=401, detail=f"Authentication failed: {exc.message}") from exc
     except Exception as exc:
         raise HTTPException(status_code=401, detail=f"Authentication failed: {exc}") from exc
+
+
+def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+) -> dict[str, Any] | None:
+    if not credentials or not credentials.credentials or not credentials.credentials.strip():
+        return None
+
+    client = get_client()
+    if not client:
+        return None
+
+    try:
+        user_response = client.auth.get_user(credentials.credentials)
+        if not user_response or not user_response.user:
+            return None
+
+        user = user_response.user
+        return {
+            "id": user.id,
+            "email": user.email,
+            "user_metadata": user.user_metadata or {},
+        }
+    except Exception:
+        return None

@@ -24,6 +24,7 @@ export interface ApiSource {
 export interface AskRequest {
   question: string;
   repo_id?: string;
+  thread_id?: string;
 }
 
 export interface AskResponse {
@@ -31,6 +32,26 @@ export interface AskResponse {
   confidence: number;
   sources: ApiSource[];
   used_model: string;
+}
+
+export interface ChatThread {
+  id: string;
+  user_id?: string;
+  repo_id?: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ThreadMessage {
+  id: string;
+  thread_id: string;
+  role: "user" | "assistant";
+  content: string;
+  confidence?: number;
+  sources?: ApiSource[];
+  used_model?: string;
+  created_at: string;
 }
 
 export interface GovernanceRequest {
@@ -104,4 +125,91 @@ export interface ChatMessage {
   confidence?: number;
   sources?: ApiSource[];
   status?: "ready" | "loading" | "error";
+}
+
+export interface RepoMetadata {
+  name: string;
+  owner: string;
+  default_branch: string;
+  languages: Record<string, number>;
+  frameworks: string[];
+  dependencies: Record<string, string>;
+  repository_size: number;
+  file_count: number;
+  directory_count: number;
+  entry_points: string[];
+  config_files: string[];
+  technology_stack: string[];
+  tree: any;
+}
+
+export interface RepoResponse {
+  id: string;
+  type: string;
+  label: string;
+  source_url: string;
+  metadata: RepoMetadata;
+}
+
+export interface RepoImportRequest {
+  repo_url: string;
+  branch?: string;
+}
+
+export interface CommitAnalyzeRequest {
+  commit_hash: string;
+  commit_message: string;
+  diff_text?: string;
+  author?: string;
+  repo_id?: string;
+}
+
+export interface CommitAnalyzeResponse {
+  commit_hash: string;
+  summary: string;
+  impact_level: "high" | "medium" | "low";
+  affected_services: string[];
+  risk_factors: string[];
+  suggested_reviewers: string[];
+  node_id?: string;
+}
+
+export interface OnboardingSection {
+  title: string;
+  content: string;
+  items: string[];
+}
+
+export interface OnboardingGuideRequest {
+  repo_id: string;
+  role?: string;
+}
+
+export interface OnboardingGuideResponse {
+  repo_id: string;
+  role: string;
+  overview: string;
+  tech_stack: string[];
+  entry_points: string[];
+  key_decisions: string[];
+  sections: OnboardingSection[];
+}
+
+export interface TimelineEvent {
+  id: string;
+  type: string;
+  title: string;
+  description?: string;
+  timestamp: string;
+  author?: string;
+  source_url?: string;
+  tags: string[];
+  impact_level?: string;
+}
+
+export interface TimelineResponse {
+  scope: string;
+  scope_type: string;
+  total_events: number;
+  events: TimelineEvent[];
 }

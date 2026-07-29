@@ -38,6 +38,26 @@ CREATE TABLE IF NOT EXISTS user_auth_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID,
+    repo_id TEXT,
+    title TEXT NOT NULL DEFAULT 'New Conversation',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id UUID NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    confidence FLOAT,
+    sources JSONB DEFAULT '[]'::jsonb,
+    used_model TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label);
 CREATE INDEX IF NOT EXISTS idx_nodes_type  ON nodes(type);
 CREATE INDEX IF NOT EXISTS idx_edges_relation ON edges(relation);
@@ -46,3 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_node_embeddings_hnsw ON node_embeddings USING hns
 CREATE INDEX IF NOT EXISTS idx_user_auth_events_user_id ON user_auth_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_auth_events_email ON user_auth_events(email);
 CREATE INDEX IF NOT EXISTS idx_user_auth_events_created_at ON user_auth_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_user_id ON chat_threads(user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_repo_id ON chat_threads(repo_id);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_updated_at ON chat_threads(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_id ON chat_messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_created_at ON chat_messages(created_at ASC);

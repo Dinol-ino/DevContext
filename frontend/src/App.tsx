@@ -1,6 +1,15 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-import { apiBaseUrl, healthCheck, runGovernanceCheck, runIncidentAnalysis } from "./api";
+import {
+  apiBaseUrl,
+  healthCheck,
+  runGovernanceCheck,
+  runIncidentAnalysis,
+  importRepository,
+  listRepositories,
+  deleteRepository,
+  isApiBaseConfigured,
+} from "./api";
 import { Chat } from "./Chat";
 import {
   getCurrentUser,
@@ -20,6 +29,7 @@ import type {
   NavKey,
   ToastTone,
   UserProfile,
+  RepoResponse,
 } from "./types";
 
 const REPO_STORAGE_KEY = "devcontextiq:selected-repo";
@@ -153,18 +163,43 @@ function App(): JSX.Element {
     }
 
     try {
-      const result = isRegistering 
-        ? await signUpWithEmail(email, password)
-        : await signInWithEmail(email, password);
+      if (isRegistering) {
+        const result = await signUpWithEmail(email, password);
+        if (!result.ok) {
+          pushToast("error", "Registration failed", result.error || "An error occurred.");
+          return;
+        }
 
-      if (!result.ok) {
-        pushToast("error", "Authentication failed", result.error || "An error occurred.");
-        return;
+        if (result.needsConfirmation) {
+          pushToast(
+            "info", 
+            "Account Created!", 
+            "Please check your email inbox to confirm your account, then log in below."
+          );
+          setIsRegistering(false);
+        } else if (result.user) {
+          pushToast("success", "Account Created", "Welcome to DevContextIQ!");
+          setCurrentUser(result.user);
+          setAuthMode("supabase");
+        } else {
+          pushToast("success", "Account Created", "Registration successful. You may now log in.");
+          setIsRegistering(false);
+        }
+      } else {
+        const result = await signInWithEmail(email, password);
+        if (!result.ok) {
+          pushToast("error", "Login failed", result.error || "Invalid credentials.");
+          return;
+        }
+
+        pushToast("success", "Welcome Back", "You are now logged in.");
+        if (result.user) {
+          setCurrentUser(result.user);
+          setAuthMode("supabase");
+        }
       }
-
-      pushToast("success", isRegistering ? "Account created" : "Welcome back", "You are now logged in.");
     } catch (error) {
-      pushToast("error", "Authentication failed", "An unexpected error occurred.");
+      pushToast("error", "Authentication error", "An unexpected error occurred during auth.");
     }
   };
 
@@ -549,31 +584,212 @@ function IncidentPanel({ onNotify }: { onNotify: Notify }): JSX.Element {
   );
 }
 
-function SettingsPanel({ health, onNotify, selectedRepo, setSelectedRepo }: { health: BackendHealth; onNotify: Notify; selectedRepo: string; setSelectedRepo: (value: string) => void }): JSX.Element {
+function SettingsPanel({
+  health,
+  onNotify,
+  selectedRepo,
+  setSelectedRepo,
+}: {
+  health: BackendHealth;
+  onNotify: Notify;
+  selectedRepo: string;
+  setSelectedRepo: (value: string) => void;
+}): JSX.Element {
+  const [repoUrl, setRepoUrl] = useState<string>("");
+  const [branch, setBranch] = useState<string>("");
+  const [importing, setImporting] = useState<boolean>(false);
+  const [repos, setRepos] = useState<RepoResponse[]>([]);
+  const [loadingRepos, setLoadingRepos] = useState<boolean>(false);
+
+  const fetchRepos = async () => {
+    setLoadingRepos(true);
+    try {
+      const data = await listRepositories();
+      setRepos(data);
+    } catch (err) {
+      console.error("Failed to load repositories:", err);
+    } finally {
+      setLoadingRepos(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchRepos();
+  }, []);
+
+  const handleImport = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (importing) return;
+    if (!repoUrl.trim()) {
+      onNotify("error", "URL required", "Enter the GitHub repository URL to import.");
+      return;
+    }
+    setImporting(true);
+    try {
+      const result = await importRepository({
+        repo_url: repoUrl.trim(),
+        branch: branch.trim() || undefined,
+      });
+      onNotify("success", "Repository imported", `Successfully imported ${result.label}.`);
+      setRepoUrl("");
+      setBranch("");
+      setSelectedRepo(result.label);
+      void fetchRepos();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Import failed.";
+      onNotify("error", "Import failed", msg);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleDelete = async (id: string, label: string) => {
+    if (!window.confirm(`Are you sure you want to unregister repository "${label}"?`)) {
+      return;
+    }
+    try {
+      await deleteRepository(id);
+      onNotify("success", "Repository deleted", `Removed ${label} from workspace.`);
+      if (selectedRepo === label) {
+        setSelectedRepo("");
+      }
+      void fetchRepos();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Deletion failed.";
+      onNotify("error", "Deletion failed", msg);
+    }
+  };
+
   return (
     <section className="page">
       <div className="page-header">
         <div>
           <p className="eyebrow">Settings</p>
-          <h2>Prepare the workspace for production integrations.</h2>
+          <h2>Manage workspace and GitHub repository integrations.</h2>
         </div>
-        <div className="header-meta">Minimal controls now, integration surface ready for the next shipping pass.</div>
+        <div className="header-meta">
+          Import repository metadata and select your active workspace.
+        </div>
       </div>
 
       <div className="settings-grid">
+        {/* Repository Import Panel */}
         <div className="panel">
-          <div className="field-group">
-            <label className="field-label" htmlFor="repo-selector">Repo Selector</label>
-            <input id="repo-selector" className="input" onBlur={() => onNotify("success", "Repository saved", "The active repo context has been updated.")} onChange={(event) => setSelectedRepo(event.target.value)} placeholder="org/repo" type="text" value={selectedRepo} />
-          </div>
-          <div className="settings-meta">
+          <h3 style={{ marginBottom: "1rem" }}>Import Git Repository</h3>
+          <form onSubmit={handleImport} className="stack-sm">
+            <div className="field-group">
+              <label className="field-label" htmlFor="repo-url-input">GitHub Repo URL</label>
+              <input
+                id="repo-url-input"
+                className="input"
+                type="url"
+                placeholder="https://github.com/owner/repo"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                disabled={importing}
+              />
+            </div>
+            <div className="field-group">
+              <label className="field-label" htmlFor="branch-input">Branch (optional)</label>
+              <input
+                id="branch-input"
+                className="input"
+                type="text"
+                placeholder="main"
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+                disabled={importing}
+              />
+            </div>
+            <button
+              className="button button-primary button-wide"
+              type="submit"
+              disabled={importing}
+            >
+              {importing ? "Importing & Analyzing..." : "Import Repository"}
+            </button>
+          </form>
+        </div>
+
+        {/* Workspace Selector Panel */}
+        <div className="panel">
+          <h3 style={{ marginBottom: "1rem" }}>Workspace Selector</h3>
+          {loadingRepos ? (
+            <div className="stack-sm">
+              <div className="skeleton skeleton-pill" />
+              <div className="skeleton skeleton-line" />
+            </div>
+          ) : repos.length === 0 ? (
+            <div className="empty-panel" style={{ padding: "1.5rem" }}>
+              <p className="muted">No repositories imported yet.</p>
+            </div>
+          ) : (
+            <div className="stack-sm" style={{ maxHeight: "20rem", overflowY: "auto" }}>
+              {repos.map((repo) => {
+                const isActive = selectedRepo === repo.label;
+                const sizeKb = repo.metadata.repository_size
+                  ? Math.round(repo.metadata.repository_size / 1024)
+                  : 0;
+                return (
+                  <div
+                    key={repo.id}
+                    className={`list-row ${isActive ? "surface-block" : ""}`}
+                    style={{
+                      cursor: "pointer",
+                      padding: "0.75rem",
+                      borderRadius: "0.375rem",
+                      border: isActive ? "1px solid var(--accent)" : "1px solid transparent",
+                    }}
+                    onClick={() => {
+                      setSelectedRepo(repo.label);
+                      onNotify("success", "Workspace switched", `Active workspace set to ${repo.label}`);
+                    }}
+                  >
+                    <div style={{ flex: 1 }}>
+                      <strong>{repo.label}</strong>
+                      <div className="muted" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                        Branch: {repo.metadata.default_branch || "n/a"} | {repo.metadata.file_count || 0} files | {sizeKb} KB
+                      </div>
+                      {repo.metadata.technology_stack?.length ? (
+                        <div style={{ display: "flex", gap: "0.25rem", flexWrap: "wrap", marginTop: "0.35rem" }}>
+                          {repo.metadata.technology_stack.slice(0, 4).map((tech: string) => (
+                            <span key={tech} className="badge badge-muted" style={{ fontSize: "0.65rem", padding: "0.1rem 0.35rem" }}>
+                              {tech}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    <button
+                      className="button button-ghost"
+                      style={{ padding: "0.25rem 0.5rem", color: "var(--danger)" }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleDelete(repo.id, repo.label);
+                      }}
+                      type="button"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="settings-meta" style={{ marginTop: "1rem" }}>
             <div className="meta-chip">
               <span className="meta-label">API base</span>
-              <span>{apiBaseUrl}</span>
+              <span>{isApiBaseConfigured ? apiBaseUrl : "Not configured (set VITE_API_BASE_URL)"}</span>
+            </div>
+            <div className="meta-chip">
+              <span className="meta-label">Status</span>
+              <span>{health.label}</span>
             </div>
           </div>
         </div>
 
+        {/* Existing Coming Soon Placeholders */}
         {["GitHub Connect", "Organization Memory", "Billing", "Slack Bot"].map((title) => (
           <div key={title} className="panel placeholder-panel">
             <div className="placeholder-header">

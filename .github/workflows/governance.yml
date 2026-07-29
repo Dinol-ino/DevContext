@@ -1,0 +1,54 @@
+name: Architecture Governance Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  governance-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Fetch PR Diff
+        id: pr_diff
+        run: |
+          DIFF_URL="${{ github.event.pull_request.diff_url }}"
+          curl -sL "$DIFF_URL" -o pr.diff
+          echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
+
+      - name: Run Governance Analysis
+        id: check
+        env:
+          DEVCONTEXT_API_URL: ${{ secrets.DEVCONTEXT_API_URL }}
+        run: |
+          if [ -z "$DEVCONTEXT_API_URL" ]; then
+            echo "DEVCONTEXT_API_URL secret not set, skipping remote check."
+            exit 0
+          fi
+          
+          DIFF_CONTENT=$(cat pr.diff | jq -sR .)
+          PAYLOAD=$(jq -n --arg diff "$DIFF_CONTENT" --arg pr "${{ github.event.pull_request.html_url }}" '{pr_url: $pr, diff_text: $diff}')
+          
+          RESPONSE=$(curl -s -X POST "$DEVCONTEXT_API_URL/api/v1/governance/check" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+            
+          echo "response=$RESPONSE" >> $GITHUB_OUTPUT
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        if: steps.check.outputs.response != ''
+        with:
+          script: |
+            const response = JSON.parse('${{ steps.check.outputs.response }}');
+            if (response && response.comment_text) {
+              const body = `### 🛡️ DevContextIQ Governance Report\n\n${response.comment_text}\n\n**Safe to Merge:** ${response.safe_to_merge ? '✅ Yes' : '⚠️ Review Needed'}`;
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+            }

@@ -68,7 +68,7 @@ export async function signOutUser(): Promise<void> {
   await supabase.auth.signOut();
 }
 
-// --- NEW: Email Auth Functions ---
+// --- Email Auth Functions ---
 async function logAuthEvent(eventType: "register" | "login", user: User | null, email: string): Promise<void> {
   const resolvedEmail = (user?.email ?? email).trim().toLowerCase();
   if (!resolvedEmail) return;
@@ -86,20 +86,32 @@ async function logAuthEvent(eventType: "register" | "login", user: User | null, 
   }
 }
 
-export async function signInWithEmail(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
+export async function signInWithEmail(
+  email: string, 
+  password: string
+): Promise<{ ok: boolean; user?: UserProfile; error?: string }> {
   if (!supabase) return { ok: false, error: "Supabase auth is not configured." };
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) return { ok: false, error: error.message };
   await logAuthEvent("login", data.user ?? null, email);
-  return { ok: true };
+  return { ok: true, user: data.user ? mapUser(data.user) : undefined };
 }
 
-export async function signUpWithEmail(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
+export async function signUpWithEmail(
+  email: string, 
+  password: string
+): Promise<{ ok: boolean; user?: UserProfile; needsConfirmation?: boolean; error?: string }> {
   if (!supabase) return { ok: false, error: "Supabase auth is not configured." };
   const { data, error } = await supabase.auth.signUp({ email, password });
   if (error) return { ok: false, error: error.message };
   await logAuthEvent("register", data.user ?? null, email);
-  return { ok: true };
+
+  const needsConfirmation = !data.session;
+  return { 
+    ok: true, 
+    user: data.user ? mapUser(data.user) : undefined, 
+    needsConfirmation 
+  };
 }
 
 export async function getSessionToken(): Promise<string | null> {
@@ -108,4 +120,3 @@ export async function getSessionToken(): Promise<string | null> {
   if (error || !data.session) return null;
   return data.session.access_token;
 }
-

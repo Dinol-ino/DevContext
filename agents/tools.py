@@ -123,8 +123,7 @@ def _get_embedding_model():
         return None
 
 
-# Cache at module level so the model loads once per process
-_EMBEDDING_MODEL_CACHE: list = []  # holds [model] or [] when unavailable
+_EMBEDDING_MODEL_CACHE: list = []
 
 
 def _get_cached_model():
@@ -173,7 +172,18 @@ def format_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sources
 
 
-
+def _evidence_prompt(evidence: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for row in evidence[:5]:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        reason = str(metadata.get("reason") or "").strip()
+        services = metadata.get("services") if isinstance(metadata.get("services"), list) else []
+        lines.append(
+            f"Title: {row.get('label') or 'Unknown'} | "
+            f"Reason: {reason or 'n/a'} | "
+            f"Services: {', '.join(str(item) for item in services) if services else 'n/a'}"
+        )
+    return "\n".join(lines)
 
 
 def _rank_rows(query: str, rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
@@ -243,11 +253,11 @@ def _row_has_exact_match(question: str, row: dict[str, Any]) -> bool:
     return False
 
 
-def _service_lexical_search(question: str, services: list[str], limit: int = 8) -> list[dict[str, Any]]:
+def _service_lexical_search(question: str, services: list[str], limit: int = 8, repo_id: str | None = None) -> list[dict[str, Any]]:
     if not services:
         return []
 
-    rows = fetch_recent_nodes(limit=350)
+    rows = fetch_recent_nodes(limit=350, repo_id=repo_id)
     query = _clean_text(question).lower()
     scored: list[tuple[float, dict[str, Any]]] = []
 
@@ -300,9 +310,9 @@ def _rank_rows_with_intent(
         label = _normalize_value(row.get("label") or row.get("title"))
         node_type = _normalize_value(row.get("type"))
         reason = _normalize_value(_metadata_value(row, "reason"))
-        services = _normalize_value(_metadata_value(row, "services"))
+        services_val = _normalize_value(_metadata_value(row, "services"))
         chunk = _normalize_value(row.get("chunk"))
-        haystack = " ".join(part for part in [label, node_type, reason, services, chunk] if part)
+        haystack = " ".join(part for part in [label, node_type, reason, services_val, chunk] if part)
         haystack_lower = haystack.lower()
         row_terms = _tokenize(haystack)
         overlap = query_terms.intersection(row_terms)
@@ -312,8 +322,8 @@ def _rank_rows_with_intent(
             lexical_score += 4.0
         if lowered_query in haystack_lower and lowered_query:
             lexical_score += 2.5
-        if services:
-            lexical_score += min(2.0, len(query_terms.intersection(_tokenize(services))) * 0.75)
+        if services_val:
+            lexical_score += min(2.0, len(query_terms.intersection(_tokenize(services_val))) * 0.75)
 
         vector_score = float(row.get("_vector_score", 0.0)) * 4.0
         exact_match_bonus = 2.0 if _row_has_exact_match(query_text, row) else 0.0
@@ -347,11 +357,11 @@ def _rank_rows_with_intent(
     return [row for _, row in scored[:limit]]
 
 
-def search_nodes(question: str, limit: int = 5) -> list[dict[str, Any]]:
-    return search_nodes_text(question, limit=max(1, limit))
+def search_nodes(question: str, limit: int = 5, repo_id: str | None = None) -> list[dict[str, Any]]:
+    return search_nodes_text(question, limit=max(1, limit), repo_id=repo_id)
 
 
-def _graph_context(node_ids: list[str]) -> list[dict[str, Any]]:
+def _graph_context(node_ids: list[str], repo_id: str | None = None) -> list[dict[str, Any]]:
     clean_ids = [_clean_text(node_id) for node_id in node_ids if _clean_text(node_id)]
     if not clean_ids:
         return []
@@ -360,7 +370,7 @@ def _graph_context(node_ids: list[str]) -> list[dict[str, Any]]:
     if not related_edges:
         return []
 
-    recent_nodes = fetch_recent_nodes(limit=300)
+    recent_nodes = fetch_recent_nodes(limit=300, repo_id=repo_id)
     node_index = {_clean_text(row.get("id")): row for row in recent_nodes if _clean_text(row.get("id"))}
 
     neighbors: list[dict[str, Any]] = []
@@ -377,15 +387,15 @@ def _graph_context(node_ids: list[str]) -> list[dict[str, Any]]:
     return neighbors
 
 
-def retrieve_context(question: str) -> dict[str, Any]:
+def retrieve_context(question: str, repo_id: str | None = None) -> dict[str, Any]:
     intent = _infer_query_intent(question)
-    lexical_rows = search_nodes(question, limit=8)
+    lexical_rows = search_nodes(question, limit=8, repo_id=repo_id)
     query_embedding = _generate_query_embedding(question)
-    vector_rows = fetch_embedding_matches(query_embedding, limit=6) if query_embedding else []
-    recent_rows = fetch_recent_nodes(limit=10 if intent.get("recent") else 4)
-    decision_rows = fetch_decisions(limit=120) if intent.get("decision") else []
+    vector_rows = fetch_embedding_matches(query_embedding, limit=6, repo_id=repo_id) if query_embedding else []
+    recent_rows = fetch_recent_nodes(limit=10 if intent.get("recent") else 4, repo_id=repo_id)
+    decision_rows = fetch_decisions(limit=120, repo_id=repo_id) if intent.get("decision") else []
     decision_focus_rows = _rank_rows_with_intent(question, decision_rows, intent=intent, limit=8) if decision_rows else []
-    service_rows = _service_lexical_search(question, intent.get("services", []), limit=8)
+    service_rows = _service_lexical_search(question, intent.get("services", []), limit=8, repo_id=repo_id)
 
     node_ids = [
         _clean_text(row.get("id") or row.get("node_id"))
@@ -393,7 +403,7 @@ def retrieve_context(question: str) -> dict[str, Any]:
         if _clean_text(row.get("id") or row.get("node_id"))
     ]
 
-    graph_rows = _graph_context(node_ids)
+    graph_rows = _graph_context(node_ids, repo_id=repo_id)
 
     combined = lexical_rows + vector_rows + decision_focus_rows + service_rows + graph_rows + recent_rows
     ranked = _rank_rows_with_intent(question, combined, intent=intent, limit=8)
@@ -428,62 +438,88 @@ def compute_confidence(
 
 def detect_conflict(diff_text: str) -> dict[str, Any]:
     text = _clean_text(diff_text)
-    lowered = text.lower()
+    if not text:
+        return {
+            "has_conflicts": False,
+            "severity": "low",
+            "matched_rules": [],
+            "comment_text": "Empty diff provided. No conflicts detected.",
+            "safe_to_merge": True,
+        }
+
     query_terms = _tokenize(text)
-    matched_rules: list[str] = []
+    lowered = text.lower()
+    decisions = fetch_decisions(limit=300)
 
-    keyword_rules = {
-        "bypass auth": "high",
-        "remove rate limiting": "high",
-        "direct db access": "high",
-        "secret": "high",
-        "token": "high",
-        "rate limit": "medium",
-        "gateway": "medium",
-        "auth": "high",
-        "db": "high",
-        "retry": "medium",
-        "payment": "high",
-        "cache": "medium",
-    }
+    matched_conflicts: list[dict[str, Any]] = []
+    matched_labels: list[str] = []
 
-    for row in fetch_decisions(limit=200):
+    for row in decisions:
         label = _clean_text(row.get("label"))
         if not label:
             continue
 
         label_lower = label.lower()
         overlap = query_terms.intersection(_tokenize(label))
-        if label_lower in lowered or len(overlap) >= 2:
-            matched_rules.append(label)
+        metadata = _metadata_value(row, "reason") or ""
 
-    for keyword in keyword_rules:
-        if keyword in lowered and keyword not in matched_rules:
-            matched_rules.append(keyword)
+        # Match if decision label or reason shares significant context with diff
+        if label_lower in lowered or len(overlap) >= 2 or (metadata and any(term in lowered for term in _tokenize(str(metadata)) if len(term) > 4)):
+            risk = str(_metadata_value(row, "risk") or "medium").lower()
+            reason = str(_metadata_value(row, "reason") or f"Matched architecture decision: {label}").strip()
+            matched_conflicts.append({
+                "label": label,
+                "reason": reason,
+                "risk": risk if risk in {"high", "medium", "low"} else "medium",
+                "url": row.get("source_url"),
+            })
+            matched_labels.append(label)
 
-    if not matched_rules:
+    # Check for critical security and architectural code smells in the diff text
+    danger_patterns = [
+        ("bypass", "Potential security/auth bypass detected in code changes"),
+        ("disable_auth", "Disabling authentication guard controls"),
+        ("unauthenticated", "Allowing unauthenticated access to protected boundaries"),
+        ("hardcoded", "Hardcoded credentials or sensitive configuration detected"),
+        ("disable_rate_limit", "Disabling API rate limiting or throttling controls"),
+        ("skip_validation", "Skipping input/security validation checks"),
+    ]
+
+    for pattern, description in danger_patterns:
+        if pattern in lowered:
+            matched_conflicts.append({
+                "label": f"AI Risk Guard: {pattern.replace('_', ' ').title()}",
+                "reason": description,
+                "risk": "high" if any(p in pattern for p in ["bypass", "unauthenticated", "disable_auth"]) else "medium",
+                "url": "adr://ai-risk-guard",
+            })
+            matched_labels.append(f"AI Guard: {pattern.replace('_', ' ').title()}")
+
+    if not matched_conflicts:
         return {
             "has_conflicts": False,
             "severity": "low",
             "matched_rules": [],
-            "comment_text": "No conflicts detected against stored architecture decisions.",
+            "comment_text": "No conflicts detected against stored architecture decisions or security rules.",
             "safe_to_merge": True,
         }
 
-    severity = "low"
-    if any(keyword_rules.get(rule) == "high" for rule in matched_rules):
-        severity = "high"
-    elif any(keyword_rules.get(rule) == "medium" for rule in matched_rules) or len(matched_rules) > 1:
-        severity = "medium"
+    has_high = any(c["risk"] == "high" for c in matched_conflicts)
+    has_medium = any(c["risk"] == "medium" for c in matched_conflicts)
+    severity = "high" if has_high else ("medium" if has_medium or len(matched_conflicts) > 1 else "low")
+
+    explanations = [f"• {c['label']}: {c['reason']}" for c in matched_conflicts[:5]]
+    comment_text = (
+        f"Detected {len(matched_conflicts)} potential architecture/security conflict(s):\n"
+        + "\n".join(explanations)
+    )
 
     return {
         "has_conflicts": True,
         "severity": severity,
-        "matched_rules": matched_rules[:8],
-        "comment_text": (
-            f"Potential governance conflicts found for: {', '.join(matched_rules[:5])}. "
-            "Review this diff against stored decisions before merging."
-        ),
+        "matched_rules": matched_labels[:8],
+        "conflicts": matched_conflicts,
+        "comment_text": comment_text,
         "safe_to_merge": severity == "low",
     }
 
@@ -492,92 +528,71 @@ def analyze_incident(alert_title: str, service_name: str, error_snippet: str) ->
     alert = _clean_text(alert_title)
     service = _clean_text(service_name)
     snippet = _clean_text(error_snippet)
-    combined = " ".join(part for part in [alert, service, snippet] if part).lower()
+    combined_query = f"{alert} {service} {snippet}".strip()
 
-    history_rows = _rank_rows(combined, fetch_incidents(limit=150), limit=3)
-    issue = "General service incident requiring investigation."
-    severity = "low"
-    likely_cause = "Signal is limited. Check recent deploys, config changes, and service health."
-    fix_steps: list[str] = []
-    warnings: list[str] = []
+    # Dynamic RAG over stored incident, service, and decision nodes
+    rag_result = retrieve_context(combined_query)
+    evidence = rag_result.get("evidence", [])
 
-    if any(keyword in combined for keyword in ["db", "database", "pool", "connection"]):
-        issue = "Database saturation or connection exhaustion."
-        severity = "high"
-        likely_cause = "Connection pool exhaustion, blocked queries, or database resource pressure."
-        fix_steps.extend(
-            [
-                "Check active DB sessions, pool usage, and slow query logs.",
-                "Review recent deploys or migrations that changed query behavior.",
-                "Reduce traffic or scale capacity if the database is saturated.",
-            ]
-        )
-        warnings.append("Avoid restarting blindly before capturing DB evidence.")
+    history_incidents = fetch_incidents(limit=100)
+    matched_history = _rank_rows(combined_query, history_incidents, limit=3)
 
-    if "timeout" in combined or "latency" in combined:
-        if severity != "high":
-            severity = "medium"
-        likely_cause = "Upstream latency, retry amplification, or timeout misconfiguration."
-        fix_steps.extend(
-            [
-                "Trace request latency across upstream dependencies.",
-                "Check timeout and retry settings on the affected path.",
-            ]
-        )
-        warnings.append("Retries can worsen a partial outage if the dependency is degraded.")
+    system_prompt = (
+        "You are an expert SRE and Incident Response Agent. Analyze the incident alert, service, error snippet, "
+        "and retrieved architectural/incident context. Output ONLY JSON with keys: "
+        '{"issue": string, "severity": "high"|"medium"|"low", "likely_cause": string, '
+        '"fix_steps": list[string], "warnings": list[string]}'
+    )
+    user_prompt = (
+        f"Alert: {alert}\nService: {service}\nSnippet: {snippet}\n\n"
+        f"Retrieved Architecture Evidence:\n{_evidence_prompt(evidence[:4])}\n"
+        f"Historical Incidents Count: {len(matched_history)}"
+    )
 
-    if "gateway" in combined or "rate limit" in combined:
-        if severity == "low":
-            severity = "medium"
-        issue = "Gateway routing, throttling, or policy degradation."
-        likely_cause = "Gateway policy changes, upstream backpressure, or auth propagation issues."
-        fix_steps.extend(
-            [
-                "Inspect gateway logs, route policies, and throttling counters.",
-                "Validate auth headers, upstream health checks, and recent config changes.",
-            ]
-        )
+    llm_raw = call_llm(system_prompt, user_prompt)
+    parsed = parse_json_response(llm_raw)
 
-    if "payment" in combined:
-        issue = "Payment flow degradation."
-        severity = "high"
-        likely_cause = "Provider instability, webhook backlog, or non-idempotent retry behavior."
-        fix_steps.extend(
-            [
-                "Check provider status, failed transactions, and webhook processing backlog.",
-                "Verify idempotency protections before replaying payment operations.",
-            ]
-        )
-        warnings.append("Do not replay payment requests without idempotency keys.")
+    if parsed and isinstance(parsed.get("fix_steps"), list) and parsed.get("issue"):
+        return {
+            "issue": _clean_text(parsed.get("issue")),
+            "severity": _clean_text(parsed.get("severity")) or "medium",
+            "likely_cause": _clean_text(parsed.get("likely_cause")),
+            "fix_steps": [_clean_text(step) for step in parsed.get("fix_steps") if _clean_text(step)],
+            "warnings": [_clean_text(w) for w in parsed.get("warnings", []) if _clean_text(w)],
+        }
 
-    if not fix_steps:
-        fix_steps = [
-            "Collect timestamps, request IDs, and affected endpoints.",
-            "Check recent deploys, config changes, and dependency health.",
-            "Escalate to the owning service team with logs and metrics.",
-        ]
+    # Dynamic fallback synthesis directly from RAG evidence
+    issue_desc = f"Operational incident affecting service '{service or 'unknown'}'"
+    if alert:
+        issue_desc += f": {alert}"
 
-    if history_rows:
-        history_labels = ", ".join(_clean_text(row.get("label")) for row in history_rows if _clean_text(row.get("label")))
+    likely_cause_desc = "Signal requires investigation."
+    if evidence:
+        causes = [str(_metadata_value(row, "reason") or row.get("label")) for row in evidence[:2] if row.get("label")]
+        if causes:
+            likely_cause_desc = f"Potential context correlation with stored decisions: {'; '.join(causes)}."
+
+    if matched_history:
+        history_labels = ", ".join(_clean_text(row.get("label")) for row in matched_history if row.get("label"))
         if history_labels:
-            likely_cause += f" Similar historical records: {history_labels}."
+            likely_cause_desc += f" Similar historical incident records: {history_labels}."
 
-    deduped_steps: list[str] = []
-    for step in fix_steps:
-        if step not in deduped_steps:
-            deduped_steps.append(step)
+    steps = [
+        f"Inspect active logs, metrics, and tracing for service '{service or 'affected service'}'.",
+        "Verify recent deployment changes, config updates, and upstream status.",
+        "Check database connection pool, latency counters, and rate limit errors.",
+    ]
 
-    deduped_warnings: list[str] = []
-    for warning in warnings:
-        if warning not in deduped_warnings:
-            deduped_warnings.append(warning)
+    warnings_list = [
+        "Capture memory dumps and log snapshots prior to restarting instances.",
+    ]
 
     return {
-        "issue": issue,
-        "severity": severity,
-        "likely_cause": likely_cause,
-        "fix_steps": deduped_steps,
-        "warnings": deduped_warnings,
+        "issue": issue_desc,
+        "severity": "medium" if (evidence or matched_history) else "low",
+        "likely_cause": likely_cause_desc,
+        "fix_steps": steps,
+        "warnings": warnings_list,
     }
 
 

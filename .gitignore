@@ -1,22 +1,23 @@
-<<<<<<< HEAD
+.env
 venv/
 __pycache__/
 *.pyc
-.env
-node_modules/
 *.log
+
+node_modules/
+frontend/node_modules/
+frontend/dist/
 dist/
 build/
+
 .idea/
 .vscode/
-=======
-.env
+.agents/
 ingestion/__pycache__/
-node_modules/
+
 req.txt
 test.js
 test_backend.py
-venv/
 MANUAL.md
-.agents
->>>>>>> main
+
+/cloned_repos/

@@ -4,12 +4,22 @@ import type {
   ApiSource,
   AskRequest,
   AskResponse,
+  ChatThread,
+  CommitAnalyzeRequest,
+  CommitAnalyzeResponse,
   GovernanceConflict,
   GovernanceRequest,
   GovernanceResponse,
   HealthResponse,
   IncidentRequest,
   IncidentResponse,
+  OnboardingGuideRequest,
+  OnboardingGuideResponse,
+  RepoImportRequest,
+  RepoResponse,
+  ThreadMessage,
+  TimelineEvent,
+  TimelineResponse,
 } from "./types";
 import { getSessionToken } from "./supabase";
 
@@ -310,4 +320,99 @@ export async function recordAuthEvent(payload: AuthEventRequest): Promise<AuthEv
     event_type: typeof raw.event_type === "string" ? raw.event_type : payload.event_type,
     email: typeof raw.email === "string" ? raw.email : payload.email,
   };
+}
+
+export async function importRepository(payload: RepoImportRequest): Promise<RepoResponse> {
+  return await request<RepoResponse>("/repo/import", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listRepositories(): Promise<RepoResponse[]> {
+  return await request<RepoResponse[]>("/repo/list", {
+    method: "GET",
+  });
+}
+
+export async function deleteRepository(repoId: string): Promise<{ status: string; id: string }> {
+  return await request<{ status: string; id: string }>(`/repo/${repoId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function createChatThread(title?: string, repoId?: string): Promise<ChatThread> {
+  return await request<ChatThread>("/chat/threads", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title: title || "New Conversation", repo_id: repoId || undefined }),
+  });
+}
+
+export async function listChatThreads(repoId?: string): Promise<ChatThread[]> {
+  const query = repoId ? `?repo_id=${encodeURIComponent(repoId)}` : "";
+  return await request<ChatThread[]>(`/chat/threads${query}`, {
+    method: "GET",
+  });
+}
+
+export async function getThreadMessages(threadId: string): Promise<ThreadMessage[]> {
+  return await request<ThreadMessage[]>(`/chat/threads/${threadId}/messages`, {
+    method: "GET",
+  });
+}
+
+export async function deleteChatThread(threadId: string): Promise<{ status: string; id: string }> {
+  return await request<{ status: string; id: string }>(`/chat/threads/${threadId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function analyzeCommit(payload: CommitAnalyzeRequest): Promise<CommitAnalyzeResponse> {
+  return await request<CommitAnalyzeResponse>("/commit/analyze", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getCommitHistory(repoId: string): Promise<any[]> {
+  return await request<any[]>(`/commit/history/${encodeURIComponent(repoId)}`, {
+    method: "GET",
+  });
+}
+
+export async function generateOnboardingGuide(payload: OnboardingGuideRequest): Promise<OnboardingGuideResponse> {
+  return await request<OnboardingGuideResponse>("/onboarding/guide", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getOnboardingOverview(repoId: string): Promise<any> {
+  return await request<any>(`/onboarding/overview/${encodeURIComponent(repoId)}`, {
+    method: "GET",
+  });
+}
+
+export async function getRepoTimeline(repoId: string): Promise<TimelineResponse> {
+  return await request<TimelineResponse>(`/timeline/${encodeURIComponent(repoId)}`, {
+    method: "GET",
+  });
+}
+
+export async function getServiceTimeline(serviceName: string): Promise<TimelineResponse> {
+  return await request<TimelineResponse>(`/timeline/service/${encodeURIComponent(serviceName)}`, {
+    method: "GET",
+  });
 }

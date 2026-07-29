@@ -9,10 +9,12 @@ try:
     from .prompts import CONTEXT_SYSTEM_PROMPT
     from .tools import call_llm, format_sources, get_used_model, retrieve_context
     from .auth_utils import get_current_user
+    from .db import add_chat_message
 except ImportError:
     from prompts import CONTEXT_SYSTEM_PROMPT
     from tools import call_llm, format_sources, get_used_model, retrieve_context
     from auth_utils import get_current_user
+    from db import add_chat_message
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=False)
@@ -22,6 +24,8 @@ router = APIRouter(tags=["Context"])
 
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, examples=["Why was gateway rate limiting introduced?"])
+    repo_id: Optional[str] = Field(default=None, description="Optional repo identifier to scope context retrieval")
+    thread_id: Optional[str] = Field(default=None, description="Optional chat thread identifier for persistent context memory")
 
     @field_validator("question")
     @classmethod
@@ -91,14 +95,22 @@ def ask(payload: AskRequest, current_user: dict = Depends(get_current_user)) -> 
 
     try:
         used_model = get_used_model()
-        context = retrieve_context(payload.question)
+        context = retrieve_context(payload.question, repo_id=payload.repo_id)
         evidence = context.get("evidence", [])
         sources = context.get("sources") or format_sources(evidence)
         confidence = float(context.get("confidence", 0.0))
 
         if not evidence:
+            answer = "Insufficient internal context to answer this question."
+            if payload.thread_id:
+                try:
+                    add_chat_message(payload.thread_id, "user", payload.question)
+                    add_chat_message(payload.thread_id, "assistant", answer, confidence=0.0, sources=[], used_model=used_model)
+                except Exception:
+                    pass
+
             return AskResponse(
-                answer="Insufficient internal context to answer this question.",
+                answer=answer,
                 confidence=0.0,
                 sources=[],
                 used_model=used_model,
@@ -109,6 +121,20 @@ def ask(payload: AskRequest, current_user: dict = Depends(get_current_user)) -> 
             f"Question: {payload.question}\n\nEvidence:\n{_evidence_prompt(evidence)}",
         )
         answer = llm_answer or _deterministic_answer(evidence)
+
+        if payload.thread_id:
+            try:
+                add_chat_message(payload.thread_id, "user", payload.question)
+                add_chat_message(
+                    payload.thread_id,
+                    "assistant",
+                    answer,
+                    confidence=confidence,
+                    sources=sources,
+                    used_model=used_model,
+                )
+            except Exception:
+                pass
 
         return AskResponse(
             answer=answer,

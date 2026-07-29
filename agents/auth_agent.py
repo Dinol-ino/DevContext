@@ -2,13 +2,15 @@ import re
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, Field, field_validator
 
 try:
     from .db import log_user_auth_event
+    from .auth_utils import get_optional_current_user
 except ImportError:
     from db import log_user_auth_event
+    from auth_utils import get_optional_current_user
 
 router = APIRouter(tags=["Auth"])
 
@@ -51,7 +53,11 @@ class AuthEventResponse(BaseModel):
 
 
 @router.post("/auth/log", response_model=AuthEventResponse)
-def log_auth_event(payload: AuthEventRequest, request: Request) -> AuthEventResponse:
+def log_auth_event(
+    payload: AuthEventRequest,
+    request: Request,
+    current_user: dict | None = Depends(get_optional_current_user),
+) -> AuthEventResponse:
     try:
         stored = log_user_auth_event(
             event_type=payload.event_type,

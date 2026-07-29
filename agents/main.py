@@ -6,6 +6,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -16,14 +22,24 @@ logger = logging.getLogger("devcontextiq.agents")
 
 try:
     from .auth_agent import router as auth_router
+    from .commit_agent import router as commit_router
     from .context_agent import router as context_router
     from .governance_agent import router as gov_router
     from .incident_agent import router as incident_router
+    from .memory_agent import router as memory_router
+    from .onboarding_agent import router as onboarding_router
+    from .repository_agent import router as repo_router
+    from .timeline_agent import router as timeline_router
 except ImportError:
     from auth_agent import router as auth_router
+    from commit_agent import router as commit_router
     from context_agent import router as context_router
     from governance_agent import router as gov_router
     from incident_agent import router as incident_router
+    from memory_agent import router as memory_router
+    from onboarding_agent import router as onboarding_router
+    from repository_agent import router as repo_router
+    from timeline_agent import router as timeline_router
 
 API_PREFIX = "/api/v1"
 DEFAULT_ALLOWED_ORIGINS = [
@@ -52,6 +68,8 @@ def _get_allowed_origins() -> list[str]:
     return origins
 
 app = FastAPI(title="DevContextIQ API", version="2.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 @app.on_event("startup")
@@ -87,7 +105,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_get_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -95,6 +113,11 @@ app.include_router(context_router, prefix=API_PREFIX)
 app.include_router(gov_router, prefix=API_PREFIX)
 app.include_router(incident_router, prefix=API_PREFIX)
 app.include_router(auth_router, prefix=API_PREFIX)
+app.include_router(repo_router, prefix=API_PREFIX)
+app.include_router(memory_router, prefix=API_PREFIX)
+app.include_router(commit_router, prefix=API_PREFIX)
+app.include_router(onboarding_router, prefix=API_PREFIX)
+app.include_router(timeline_router, prefix=API_PREFIX)
 
 
 @app.exception_handler(HTTPException)
@@ -104,7 +127,8 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONResponse:
-    return JSONResponse(status_code=500, content={"detail": f"Internal server error: {exc}"})
+    logger.error("Unhandled exception: %s", exc, exc_info=True)
+    return JSONResponse(status_code=500, content={"detail": "An internal server error occurred."})
 
 
 @app.get("/")

@@ -109,6 +109,39 @@ def get_supabase_client() -> Client | None:
     return get_client()
 
 
+def _repo_filter_rows(rows: list[dict[str, Any]], repo_id: str | None) -> list[dict[str, Any]]:
+    """Filter rows to those belonging to a given repo_id (owner/name format).
+
+    Matches against:
+      - node label (for repo nodes)
+      - metadata.repo
+      - metadata.owner + '/' + metadata.name
+    When repo_id is None or empty, returns all rows unchanged.
+    """
+    clean_repo = _clean_text(repo_id).lower() if repo_id else ""
+    if not clean_repo:
+        return rows
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        label = _clean_text(row.get("label")).lower()
+        meta = _metadata(row)
+        meta_repo = _clean_text(meta.get("repo")).lower()
+        meta_owner = _clean_text(meta.get("owner")).lower()
+        meta_name = _clean_text(meta.get("name")).lower()
+        composite = f"{meta_owner}/{meta_name}" if meta_owner and meta_name else ""
+
+        if (
+            clean_repo == label
+            or clean_repo == meta_repo
+            or clean_repo == composite
+            or clean_repo in label
+            or clean_repo in meta_repo
+        ):
+            filtered.append(row)
+    return filtered
+
+
 def health_check() -> bool:
     client = get_client()
     if client is None:
@@ -131,30 +164,34 @@ def _safe_select(table_name: str, columns: str = "*", limit: int = 200) -> list[
     return response.data or []
 
 
-def fetch_recent_nodes(limit: int = 20) -> list[dict[str, Any]]:
+def fetch_recent_nodes(limit: int = 20, repo_id: str | None = None) -> list[dict[str, Any]]:
     client = get_client()
     if client is None:
         return []
 
-    capped_limit = max(1, min(limit, 300))
+    # Fetch more rows when filtering so we still get enough after the filter
+    fetch_limit = max(1, min(limit * 3 if repo_id else limit, 500))
     try:
-        response = client.table("nodes").select("*").order("created_at", desc=True).limit(capped_limit).execute()
-        return response.data or []
+        response = client.table("nodes").select("*").order("created_at", desc=True).limit(fetch_limit).execute()
+        rows = response.data or []
     except Exception:
-        return _safe_select("nodes", limit=capped_limit)
+        rows = _safe_select("nodes", limit=fetch_limit)
+
+    rows = _repo_filter_rows(rows, repo_id)
+    return rows[:max(1, limit)]
 
 
-def fetch_nodes(limit: int = 200) -> list[dict[str, Any]]:
-    return fetch_recent_nodes(limit=limit)
+def fetch_nodes(limit: int = 200, repo_id: str | None = None) -> list[dict[str, Any]]:
+    return fetch_recent_nodes(limit=limit, repo_id=repo_id)
 
 
-def search_nodes_text(query: str, limit: int = 10) -> list[dict[str, Any]]:
+def search_nodes_text(query: str, limit: int = 10, repo_id: str | None = None) -> list[dict[str, Any]]:
     query_text = _clean_text(query)
     if not query_text:
         return []
 
     query_terms = _tokenize(query_text)
-    rows = fetch_recent_nodes(limit=300)
+    rows = fetch_recent_nodes(limit=300, repo_id=repo_id)
     scored: list[tuple[float, dict[str, Any]]] = []
 
     for row in rows:
@@ -229,7 +266,7 @@ def _fetch_nodes_by_ids(node_ids: list[str]) -> dict[str, dict[str, Any]]:
     return {_clean_text(row.get("id")): row for row in (response.data or []) if _clean_text(row.get("id"))}
 
 
-def fetch_embedding_matches(query_embedding: list[float], limit: int = 5) -> list[dict[str, Any]]:
+def fetch_embedding_matches(query_embedding: list[float], limit: int = 5, repo_id: str | None = None) -> list[dict[str, Any]]:
     clean_query = _parse_embedding(query_embedding)
     if not clean_query:
         return []
@@ -238,6 +275,40 @@ def fetch_embedding_matches(query_embedding: list[float], limit: int = 5) -> lis
     if client is None:
         return []
 
+    # Try pgvector-native RPC first (uses HNSW index)
+    try:
+        rpc_params: dict[str, Any] = {
+            "query_embedding": clean_query,
+            "match_limit": max(1, limit),
+        }
+        if repo_id and _clean_text(repo_id):
+            rpc_params["filter_repo_id"] = _clean_text(repo_id)
+
+        response = client.rpc("match_embeddings", rpc_params).execute()
+        rpc_rows = response.data or []
+
+        if rpc_rows:
+            node_ids = [_clean_text(row.get("node_id")) for row in rpc_rows if _clean_text(row.get("node_id"))]
+            node_map = _fetch_nodes_by_ids(node_ids)
+
+            merged: list[dict[str, Any]] = []
+            for row in rpc_rows:
+                node_id = _clean_text(row.get("node_id"))
+                similarity = float(row.get("similarity", 0.0))
+                if similarity <= 0:
+                    continue
+                node = dict(node_map.get(node_id, {}))
+                node["node_id"] = node_id
+                node["chunk"] = row.get("chunk")
+                node["_vector_score"] = round(similarity, 4)
+                if not node.get("id"):
+                    node["id"] = node_id
+                merged.append(node)
+            return merged
+    except Exception:
+        pass  # Fall back to brute-force if RPC is not available
+
+    # Fallback: brute-force cosine similarity in Python
     try:
         response = client.table("node_embeddings").select("node_id,chunk,embedding").limit(250).execute()
     except Exception:
@@ -262,9 +333,10 @@ def fetch_embedding_matches(query_embedding: list[float], limit: int = 5) -> lis
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     top_rows = [row for _, row in candidates[: max(1, limit)]]
+    top_rows = _repo_filter_rows(top_rows, repo_id) if repo_id else top_rows
     node_map = _fetch_nodes_by_ids([_clean_text(row.get("node_id")) for row in top_rows])
 
-    merged: list[dict[str, Any]] = []
+    merged_fallback: list[dict[str, Any]] = []
     for row in top_rows:
         node_id = _clean_text(row.get("node_id"))
         node = dict(node_map.get(node_id, {}))
@@ -273,20 +345,20 @@ def fetch_embedding_matches(query_embedding: list[float], limit: int = 5) -> lis
         node["_vector_score"] = row.get("_vector_score", 0.0)
         if not node.get("id"):
             node["id"] = node_id
-        merged.append(node)
+        merged_fallback.append(node)
 
-    return merged
-
-
-def fetch_decisions(limit: int = 200) -> list[dict[str, Any]]:
-    return [row for row in fetch_recent_nodes(limit=limit) if _clean_text(row.get("type")).lower() == "decision"]
+    return merged_fallback
 
 
-def fetch_services(limit: int = 200) -> list[dict[str, Any]]:
+def fetch_decisions(limit: int = 200, repo_id: str | None = None) -> list[dict[str, Any]]:
+    return [row for row in fetch_recent_nodes(limit=limit, repo_id=repo_id) if _clean_text(row.get("type")).lower() == "decision"]
+
+
+def fetch_services(limit: int = 200, repo_id: str | None = None) -> list[dict[str, Any]]:
     services: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    for row in fetch_decisions(limit=limit):
+    for row in fetch_decisions(limit=limit, repo_id=repo_id):
         for service in _metadata(row).get("services", []):
             name = _clean_text(service)
             if name and name not in seen:
@@ -296,9 +368,9 @@ def fetch_services(limit: int = 200) -> list[dict[str, Any]]:
     return services
 
 
-def fetch_incidents(limit: int = 200) -> list[dict[str, Any]]:
+def fetch_incidents(limit: int = 200, repo_id: str | None = None) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    for row in fetch_recent_nodes(limit=limit):
+    for row in fetch_recent_nodes(limit=limit, repo_id=repo_id):
         row_type = _clean_text(row.get("type")).lower()
         label = _clean_text(row.get("label")).lower()
         metadata_text = _normalize_value(_metadata(row)).lower()
@@ -340,8 +412,8 @@ def log_user_auth_event(
         "user_id": _normalize_uuid(user_id),
         "email": clean_email,
         "auth_event": clean_event_type,
-        "auth_provider": _clean_text(provider) or "email",
-        "auth_source": _clean_text(source) or "frontend",
+        "provider": _clean_text(provider) or "email",
+        "source": _clean_text(source) or "frontend",
         "ip_address": _clean_text(ip_address) or None,
         "user_agent": _clean_text(user_agent) or None,
         "metadata": metadata if isinstance(metadata, dict) else {},
@@ -356,3 +428,204 @@ def log_user_auth_event(
     if data:
         return data[0]
     return payload
+
+
+# --- Graph Insertion Functions ---
+
+def _insert_node_row(node_type: str, label: str, metadata: dict[str, Any], source_url: str = "") -> str:
+    client = get_client()
+    if client is None:
+        raise RuntimeError("Database client is not initialized.")
+
+    payload = {
+        "type": _clean_text(node_type) or "decision",
+        "label": _clean_text(label),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+        "source_url": _clean_text(source_url),
+    }
+    result = client.table("nodes").insert(payload).execute()
+    rows = result.data or []
+    if not rows or not rows[0].get("id"):
+        raise RuntimeError("Node insert did not return an id.")
+    return str(rows[0]["id"])
+
+
+def _get_or_create_node(node_type: str, label: str, metadata: dict[str, Any] | None = None) -> str:
+    client = get_client()
+    clean_label = _clean_text(label)
+    if not clean_label:
+        raise ValueError(f"Cannot create or lookup {node_type} node with empty label.")
+
+    if client:
+        try:
+            result = (
+                client.table("nodes")
+                .select("id")
+                .eq("type", _clean_text(node_type))
+                .eq("label", clean_label)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            if rows:
+                return str(rows[0]["id"])
+        except Exception:
+            pass
+
+    return _insert_node_row(_clean_text(node_type), clean_label, metadata or {}, "")
+
+
+def _insert_edge_if_missing(from_node_id: str, to_node_id: str, relation: str) -> None:
+    client = get_client()
+    if client is None:
+        return
+
+    payload = {
+        "from_node_id": _clean_text(from_node_id),
+        "to_node_id": _clean_text(to_node_id),
+        "relation": _clean_text(relation),
+    }
+    try:
+        client.table("edges").upsert(payload, on_conflict="from_node_id,to_node_id,relation").execute()
+    except Exception:
+        pass
+
+
+# --- Chat Memory Functions ---
+
+def create_chat_thread(user_id: str | None = None, repo_id: str | None = None, title: str = "New Conversation") -> dict[str, Any]:
+    client = get_client()
+    if client is None:
+        raise RuntimeError("Supabase client is not initialized.")
+
+    payload = {
+        "user_id": _normalize_uuid(user_id),
+        "repo_id": _clean_text(repo_id) or None,
+        "title": _clean_text(title) or "New Conversation",
+    }
+    response = client.table("chat_threads").insert(payload).execute()
+    rows = response.data or []
+    if not rows:
+        raise RuntimeError("Failed to create chat thread.")
+    return rows[0]
+
+
+def list_chat_threads(user_id: str | None = None, repo_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    client = get_client()
+    if client is None:
+        return []
+
+    query = client.table("chat_threads").select("*").order("updated_at", desc=True).limit(max(1, min(limit, 100)))
+    clean_user_id = _normalize_uuid(user_id)
+    if clean_user_id:
+        query = query.eq("user_id", clean_user_id)
+    clean_repo_id = _clean_text(repo_id)
+    if clean_repo_id:
+        query = query.eq("repo_id", clean_repo_id)
+
+    try:
+        response = query.execute()
+        return response.data or []
+    except Exception:
+        return []
+
+
+def get_chat_thread(thread_id: str) -> dict[str, Any] | None:
+    client = get_client()
+    if client is None:
+        return None
+
+    clean_id = _normalize_uuid(thread_id)
+    if not clean_id:
+        return None
+
+    try:
+        response = client.table("chat_threads").select("*").eq("id", clean_id).limit(1).execute()
+        rows = response.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def delete_chat_thread(thread_id: str) -> bool:
+    client = get_client()
+    if client is None:
+        return False
+
+    clean_id = _normalize_uuid(thread_id)
+    if not clean_id:
+        return False
+
+    try:
+        response = client.table("chat_threads").delete().eq("id", clean_id).execute()
+        return bool(response.data)
+    except Exception:
+        return False
+
+
+def add_chat_message(
+    thread_id: str,
+    role: str,
+    content: str,
+    confidence: float | None = None,
+    sources: list[dict[str, Any]] | None = None,
+    used_model: str | None = None,
+) -> dict[str, Any]:
+    client = get_client()
+    if client is None:
+        raise RuntimeError("Supabase client is not initialized.")
+
+    clean_thread_id = _normalize_uuid(thread_id)
+    if not clean_thread_id:
+        raise ValueError("Valid thread_id is required.")
+
+    clean_role = _clean_text(role).lower()
+    if clean_role not in {"user", "assistant"}:
+        raise ValueError("Role must be 'user' or 'assistant'.")
+
+    payload = {
+        "thread_id": clean_thread_id,
+        "role": clean_role,
+        "content": _clean_text(content),
+        "confidence": float(confidence) if confidence is not None else None,
+        "sources": sources if isinstance(sources, list) else [],
+        "used_model": _clean_text(used_model) or None,
+    }
+
+    response = client.table("chat_messages").insert(payload).execute()
+    rows = response.data or []
+    if not rows:
+        raise RuntimeError("Failed to insert chat message.")
+
+    # Update thread updated_at
+    from datetime import datetime, timezone
+    try:
+        client.table("chat_threads").update({"updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", clean_thread_id).execute()
+    except Exception:
+        pass
+
+    return rows[0]
+
+
+def fetch_chat_messages(thread_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    client = get_client()
+    if client is None:
+        return []
+
+    clean_thread_id = _normalize_uuid(thread_id)
+    if not clean_thread_id:
+        return []
+
+    try:
+        response = (
+            client.table("chat_messages")
+            .select("*")
+            .eq("thread_id", clean_thread_id)
+            .order("created_at", asc=True)
+            .limit(max(1, min(limit, 200)))
+            .execute()
+        )
+        return response.data or []
+    except Exception:
+        return []
+
