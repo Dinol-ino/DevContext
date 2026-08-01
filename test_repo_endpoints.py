@@ -1,4 +1,5 @@
 import os
+
 import requests
 from dotenv import load_dotenv
 from supabase import create_client
@@ -7,20 +8,22 @@ load_dotenv()
 
 url = os.getenv("SUPABASE_URL", "")
 key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY", "")
+email = os.getenv("DEVCONTEXT_TEST_EMAIL", "").strip()
+password = os.getenv("DEVCONTEXT_TEST_PASSWORD", "").strip()
+base_url = os.getenv("DEVCONTEXT_API_BASE_URL", "http://localhost:8000/api/v1").strip().rstrip("/")
 
 if not url or not key:
     print("ERROR: SUPABASE_URL and SUPABASE_KEY/SUPABASE_SERVICE_ROLE_KEY must be set.")
-    exit(1)
+    raise SystemExit(1)
 
-# Create supabase client
+if not email or not password:
+    print("ERROR: DEVCONTEXT_TEST_EMAIL and DEVCONTEXT_TEST_PASSWORD must be set for live endpoint checks.")
+    raise SystemExit(1)
+
 supabase = create_client(url, key)
-
-email = "test_user_2026@gmail.com"
-password = "superSecurePassword123!"
 
 print("Signing in/up user...")
 try:
-    # Try signing in
     res = supabase.auth.sign_in_with_password({"email": email, "password": password})
     print("Sign in successful.")
 except Exception as exc:
@@ -30,33 +33,32 @@ except Exception as exc:
         print("Sign up successful.")
     except Exception as exc2:
         print(f"Sign up also failed: {exc2}")
-        exit(1)
+        raise SystemExit(1)
+
+if not res.session or not res.session.access_token:
+    print("ERROR: Supabase did not return a session token.")
+    raise SystemExit(1)
 
 token = res.session.access_token
 headers = {
     "Authorization": f"Bearer {token}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
 }
 
-BASE_URL = "http://localhost:8000/api/v1"
-
-# 1. Test Listing Repositories
 print("\n--- Testing GET /repo/list ---")
-r = requests.get(f"{BASE_URL}/repo/list", headers=headers)
+r = requests.get(f"{base_url}/repo/list", headers=headers, timeout=30)
 print(f"Status: {r.status_code}")
 try:
     print(r.json())
 except Exception:
     print(r.text)
 
-# 2. Test Importing Repository (we use a small public repository for speed)
-# Let's use a tiny public repo, e.g. https://github.com/octocat/Spoon-Knife
 print("\n--- Testing POST /repo/import ---")
 payload = {
     "repo_url": "https://github.com/octocat/Spoon-Knife",
-    "branch": "main"
+    "branch": "main",
 }
-r = requests.post(f"{BASE_URL}/repo/import", json=payload, headers=headers)
+r = requests.post(f"{base_url}/repo/import", json=payload, headers=headers, timeout=90)
 print(f"Status: {r.status_code}")
 try:
     import_data = r.json()
@@ -79,9 +81,8 @@ try:
 except Exception:
     print(r.text)
 
-# 3. Test List Again
 print("\n--- Testing GET /repo/list again ---")
-r = requests.get(f"{BASE_URL}/repo/list", headers=headers)
+r = requests.get(f"{base_url}/repo/list", headers=headers, timeout=30)
 print(f"Status: {r.status_code}")
 repo_id = None
 try:
@@ -93,10 +94,9 @@ try:
 except Exception:
     print(r.text)
 
-# 4. Test Deleting Repository
 if repo_id:
     print(f"\n--- Testing DELETE /repo/{repo_id} ---")
-    r = requests.delete(f"{BASE_URL}/repo/{repo_id}", headers=headers)
+    r = requests.delete(f"{base_url}/repo/{repo_id}", headers=headers, timeout=30)
     print(f"Status: {r.status_code}")
     print(r.json())
 else:

@@ -44,6 +44,15 @@ class Source(BaseModel):
     reason: Any = None
     services: Any = None
     url: Optional[str] = None
+    node_id: Any = None
+    chunk_id: Any = None
+    repo_id: Optional[str] = None
+    file_path: Optional[str] = None
+    language: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    score: Any = None
+    similarity: Any = None
 
 
 class AskResponse(BaseModel):
@@ -76,18 +85,39 @@ def _deterministic_answer(evidence: list[dict[str, Any]]) -> str:
     return " ".join(parts)
 
 
+def _trim_context_chunk(value: Any, limit: int = 1800) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n...[truncated]"
+
+
 def _evidence_prompt(evidence: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for row in evidence[:5]:
+    blocks: list[str] = []
+    for index, row in enumerate(evidence[:6], start=1):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         reason = str(metadata.get("reason") or "").strip()
         services = metadata.get("services") if isinstance(metadata.get("services"), list) else []
-        lines.append(
-            f"Title: {row.get('label') or 'Unknown'} | "
-            f"Reason: {reason or 'n/a'} | "
+        file_path = str(row.get("file_path") or "").strip()
+        line_span = ""
+        if row.get("start_line") and row.get("end_line"):
+            line_span = f":{row.get('start_line')}-{row.get('end_line')}"
+        chunk = _trim_context_chunk(row.get("chunk"))
+        header = (
+            f"Evidence {index} | Title: {row.get('label') or row.get('title') or file_path or 'Unknown'} | "
+            f"Type: {row.get('type') or 'n/a'} | "
+            f"Repo: {row.get('repo_id') or 'n/a'} | "
+            f"File: {(file_path + line_span) if file_path else 'n/a'} | "
+            f"Similarity: {row.get('_vector_score', 'n/a')} | Score: {row.get('_score', 'n/a')}"
+        )
+        details = (
+            f"Reason: {reason or 'n/a'}\n"
             f"Services: {', '.join(str(item) for item in services) if services else 'n/a'}"
         )
-    return "\n".join(lines)
+        if chunk:
+            details += f"\nCode Context:\n```\n{chunk}\n```"
+        blocks.append(f"{header}\n{details}")
+    return "\n\n".join(blocks)
 
 
 @router.post("/ask", response_model=AskResponse)

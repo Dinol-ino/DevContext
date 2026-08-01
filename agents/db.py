@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -14,6 +15,8 @@ from supabase import Client, create_client
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_FILE, override=False)
+
+logger = logging.getLogger("devcontextiq.db")
 
 
 def _clean_text(value: Any) -> str:
@@ -266,6 +269,117 @@ def _fetch_nodes_by_ids(node_ids: list[str]) -> dict[str, dict[str, Any]]:
     return {_clean_text(row.get("id")): row for row in (response.data or []) if _clean_text(row.get("id"))}
 
 
+def _embedding_select_columns(include_metadata: bool = True) -> str:
+    if include_metadata:
+        return "id,node_id,chunk,embedding,repo_id,file_path,language,start_line,end_line,content_hash"
+    return "node_id,chunk,embedding"
+
+
+def _fallback_enabled() -> bool:
+    return _clean_text(os.getenv("RAG_ENABLE_BRUTE_FORCE_FALLBACK")).lower() in {"1", "true", "yes", "on"}
+
+
+def _fallback_page_size() -> int:
+    try:
+        return max(1, int(_clean_text(os.getenv("RAG_BRUTE_FORCE_PAGE_SIZE")) or "500"))
+    except ValueError:
+        return 500
+
+
+def _fallback_max_rows() -> int:
+    try:
+        return max(1, int(_clean_text(os.getenv("RAG_BRUTE_FORCE_MAX_ROWS")) or "5000"))
+    except ValueError:
+        return 5000
+
+
+def _row_matches_repo(row: dict[str, Any], node: dict[str, Any], repo_id: str | None) -> bool:
+    clean_repo = _clean_text(repo_id)
+    if not clean_repo:
+        return True
+
+    row_repo = _clean_text(row.get("repo_id"))
+    if row_repo and row_repo == clean_repo:
+        return True
+
+    metadata = _metadata(node)
+    owner = _clean_text(metadata.get("owner"))
+    name = _clean_text(metadata.get("name"))
+    return clean_repo in {
+        _clean_text(node.get("id")),
+        _clean_text(node.get("label")),
+        _clean_text(metadata.get("repo")),
+        f"{owner}/{name}" if owner and name else "",
+    }
+
+
+def _merge_embedding_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    node_ids = [_clean_text(row.get("node_id")) for row in rows if _clean_text(row.get("node_id"))]
+    node_map = _fetch_nodes_by_ids(list(dict.fromkeys(node_ids)))
+
+    merged: list[dict[str, Any]] = []
+    for row in rows:
+        node_id = _clean_text(row.get("node_id"))
+        similarity = float(row.get("similarity", row.get("_vector_score", 0.0)) or 0.0)
+        if similarity <= 0:
+            continue
+
+        node = dict(node_map.get(node_id, {}))
+        chunk_id = _clean_text(row.get("id"))
+        node["node_id"] = node_id
+        node["chunk_id"] = chunk_id
+        node["embedding_id"] = chunk_id
+        node["chunk"] = row.get("chunk")
+        node["repo_id"] = row.get("repo_id")
+        node["file_path"] = row.get("file_path")
+        node["language"] = row.get("language")
+        node["start_line"] = row.get("start_line")
+        node["end_line"] = row.get("end_line")
+        node["content_hash"] = row.get("content_hash")
+        node["_vector_score"] = round(similarity, 4)
+        if not node.get("id"):
+            node["id"] = node_id
+        merged.append(node)
+
+    return merged
+
+
+def _fetch_embedding_rows_for_fallback(client: Client) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    page_size = _fallback_page_size()
+    max_rows = _fallback_max_rows()
+    start = 0
+    include_metadata = True
+
+    while start < max_rows:
+        end = min(start + page_size - 1, max_rows - 1)
+        try:
+            response = (
+                client.table("node_embeddings")
+                .select(_embedding_select_columns(include_metadata=include_metadata))
+                .range(start, end)
+                .execute()
+            )
+        except Exception as exc:
+            if include_metadata:
+                logger.warning("node_embeddings metadata select failed; retrying legacy select: %s", exc)
+                include_metadata = False
+                continue
+            logger.error("node_embeddings fallback select failed: %s", exc)
+            return rows
+
+        page_rows = response.data or []
+        rows.extend(page_rows)
+        if len(page_rows) < page_size:
+            break
+        start += page_size
+
+    if len(rows) >= max_rows:
+        logger.warning("Brute-force embedding fallback reached RAG_BRUTE_FORCE_MAX_ROWS=%s; results may be incomplete", max_rows)
+
+    return rows
+
+
 def fetch_embedding_matches(query_embedding: list[float], limit: int = 5, repo_id: str | None = None) -> list[dict[str, Any]]:
     clean_query = _parse_embedding(query_embedding)
     if not clean_query:
@@ -275,7 +389,6 @@ def fetch_embedding_matches(query_embedding: list[float], limit: int = 5, repo_i
     if client is None:
         return []
 
-    # Try pgvector-native RPC first (uses HNSW index)
     try:
         rpc_params: dict[str, Any] = {
             "query_embedding": clean_query,
@@ -285,37 +398,21 @@ def fetch_embedding_matches(query_embedding: list[float], limit: int = 5, repo_i
             rpc_params["filter_repo_id"] = _clean_text(repo_id)
 
         response = client.rpc("match_embeddings", rpc_params).execute()
-        rpc_rows = response.data or []
+        return _merge_embedding_rows(response.data or [])
+    except Exception as exc:
+        logger.error("match_embeddings RPC failed; semantic search degraded until migration is applied: %s", exc)
+        if not _fallback_enabled():
+            return []
 
-        if rpc_rows:
-            node_ids = [_clean_text(row.get("node_id")) for row in rpc_rows if _clean_text(row.get("node_id"))]
-            node_map = _fetch_nodes_by_ids(node_ids)
-
-            merged: list[dict[str, Any]] = []
-            for row in rpc_rows:
-                node_id = _clean_text(row.get("node_id"))
-                similarity = float(row.get("similarity", 0.0))
-                if similarity <= 0:
-                    continue
-                node = dict(node_map.get(node_id, {}))
-                node["node_id"] = node_id
-                node["chunk"] = row.get("chunk")
-                node["_vector_score"] = round(similarity, 4)
-                if not node.get("id"):
-                    node["id"] = node_id
-                merged.append(node)
-            return merged
-    except Exception:
-        pass  # Fall back to brute-force if RPC is not available
-
-    # Fallback: brute-force cosine similarity in Python
-    try:
-        response = client.table("node_embeddings").select("node_id,chunk,embedding").limit(250).execute()
-    except Exception:
+    rows = _fetch_embedding_rows_for_fallback(client)
+    if not rows:
         return []
 
     candidates: list[tuple[float, dict[str, Any]]] = []
-    for row in response.data or []:
+    for row in rows:
+        if repo_id and _clean_text(row.get("repo_id")) and _clean_text(row.get("repo_id")) != _clean_text(repo_id):
+            continue
+
         stored_vector = _parse_embedding(row.get("embedding"))
         if not stored_vector or len(stored_vector) != len(clean_query):
             continue
@@ -331,23 +428,17 @@ def fetch_embedding_matches(query_embedding: list[float], limit: int = 5, repo_i
     if not candidates:
         return []
 
+    if repo_id:
+        node_map = _fetch_nodes_by_ids(list(dict.fromkeys(_clean_text(row.get("node_id")) for _, row in candidates)))
+        candidates = [
+            (score, row)
+            for score, row in candidates
+            if _row_matches_repo(row, node_map.get(_clean_text(row.get("node_id")), {}), repo_id)
+        ]
+
     candidates.sort(key=lambda item: item[0], reverse=True)
     top_rows = [row for _, row in candidates[: max(1, limit)]]
-    top_rows = _repo_filter_rows(top_rows, repo_id) if repo_id else top_rows
-    node_map = _fetch_nodes_by_ids([_clean_text(row.get("node_id")) for row in top_rows])
-
-    merged_fallback: list[dict[str, Any]] = []
-    for row in top_rows:
-        node_id = _clean_text(row.get("node_id"))
-        node = dict(node_map.get(node_id, {}))
-        node["node_id"] = node_id
-        node["chunk"] = row.get("chunk")
-        node["_vector_score"] = row.get("_vector_score", 0.0)
-        if not node.get("id"):
-            node["id"] = node_id
-        merged_fallback.append(node)
-
-    return merged_fallback
+    return _merge_embedding_rows(top_rows)
 
 
 def fetch_decisions(limit: int = 200, repo_id: str | None = None) -> list[dict[str, Any]]:
@@ -412,8 +503,8 @@ def log_user_auth_event(
         "user_id": _normalize_uuid(user_id),
         "email": clean_email,
         "auth_event": clean_event_type,
-        "provider": _clean_text(provider) or "email",
-        "source": _clean_text(source) or "frontend",
+        "auth_provider": _clean_text(provider) or "email",
+        "auth_source": _clean_text(source) or "frontend",
         "ip_address": _clean_text(ip_address) or None,
         "user_agent": _clean_text(user_agent) or None,
         "metadata": metadata if isinstance(metadata, dict) else {},

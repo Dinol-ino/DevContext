@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -15,7 +16,7 @@ except ImportError:
 logger = logging.getLogger("devcontextiq.embed_repo")
 
 
-def embed_repository_chunks(repo_node_id: str, repo_dir: str, batch_size: int = 20) -> dict[str, Any]:
+def embed_repository_chunks(repo_node_id: str, repo_dir: str, batch_size: int = 20, repo_id: str | None = None) -> dict[str, Any]:
     """Chunk source files in repo_dir, generate embeddings, and insert into node_embeddings linked to repo_node_id."""
     client = get_client()
     if client is None:
@@ -29,6 +30,12 @@ def embed_repository_chunks(repo_node_id: str, repo_dir: str, batch_size: int = 
         return {"success": True, "embedded_count": 0, "message": "No chunks found to embed."}
 
     logger.info(f"Generated {len(chunks)} chunks. Generating embeddings...")
+
+    try:
+        client.table("node_embeddings").delete().eq("node_id", repo_node_id).execute()
+    except Exception as exc:
+        logger.warning(f"Failed to clear existing embeddings for repo node {repo_node_id}: {exc}")
+
     inserted_count = 0
     batch_rows: list[dict[str, Any]] = []
 
@@ -37,10 +44,17 @@ def embed_repository_chunks(repo_node_id: str, repo_dir: str, batch_size: int = 
         if not vector:
             continue
 
+        stored_content = chunk.content[:4000]
         row = {
             "node_id": repo_node_id,
-            "chunk": chunk.content[:4000],
+            "chunk": stored_content,
             "embedding": vector,
+            "repo_id": repo_id or repo_node_id,
+            "file_path": chunk.file_path,
+            "language": chunk.language,
+            "start_line": chunk.start_line,
+            "end_line": chunk.end_line,
+            "content_hash": hashlib.sha256(stored_content.encode("utf-8")).hexdigest(),
         }
         batch_rows.append(row)
 

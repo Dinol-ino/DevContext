@@ -182,7 +182,7 @@ def chunk_repository(repo_dir: str) -> list[CodeChunk]:
         return []
 
     chunks: list[CodeChunk] = []
-    for path in root.rglob("*"):
+    for path in sorted(root.rglob("*"), key=lambda item: str(item).lower()):
         if path.is_file():
             file_chunks = chunk_file(str(path), str(root))
             chunks.extend(file_chunks)

@@ -41,7 +41,7 @@ Frontend responsibilities:
 
 ## Backend
 
-Backend is deployed and healthy.
+The backend should be treated as a separate agents API service, not assumed healthy from documentation alone.
 
 Version shown:
 
@@ -49,14 +49,16 @@ Version shown:
 
 API Base:
 
-http://127.0.0.1:8001/api/v1
+http://127.0.0.1:8000/api/v1
 
 Likely backend stack:
 
 - FastAPI
 - REST APIs
-- OpenAI / Hugging Face model calls
+- OpenRouter model calls
 - Supabase database access
+
+Webhook ingestion is a separate FastAPI process and typically runs on `http://127.0.0.1:8001`.
 
 ## Database
 

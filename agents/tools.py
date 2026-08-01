@@ -149,41 +149,80 @@ def _generate_query_embedding(text: str) -> list[float]:
         return []
 
 
+def _source_key(row: dict[str, Any]) -> str:
+    return (
+        _clean_text(row.get("chunk_id"))
+        or _clean_text(row.get("embedding_id"))
+        or _clean_text(row.get("id"))
+        or _clean_text(row.get("node_id"))
+    )
+
+
 def format_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     for row in rows:
-        row_id = _clean_text(row.get("id")) or _clean_text(row.get("node_id"))
+        row_id = _source_key(row)
         if not row_id or row_id in seen:
             continue
         seen.add(row_id)
         sources.append(
             {
-                "id": row.get("id") or row.get("node_id"),
-                "title": row.get("label") or row.get("title"),
+                "id": row_id,
+                "node_id": row.get("node_id") or row.get("id"),
+                "chunk_id": row.get("chunk_id") or row.get("embedding_id"),
+                "title": row.get("label") or row.get("title") or row.get("file_path"),
                 "type": row.get("type"),
                 "reason": _metadata_value(row, "reason"),
                 "services": _metadata_value(row, "services"),
                 "url": row.get("source_url"),
+                "repo_id": row.get("repo_id"),
+                "file_path": row.get("file_path"),
+                "language": row.get("language"),
+                "start_line": row.get("start_line"),
+                "end_line": row.get("end_line"),
+                "score": row.get("_score"),
+                "similarity": row.get("_vector_score"),
             }
         )
 
     return sources
 
 
+def _trim_context_chunk(value: Any, limit: int = 1800) -> str:
+    text = _clean_text(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n...[truncated]"
+
+
 def _evidence_prompt(evidence: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for row in evidence[:5]:
+    blocks: list[str] = []
+    for index, row in enumerate(evidence[:6], start=1):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         reason = str(metadata.get("reason") or "").strip()
         services = metadata.get("services") if isinstance(metadata.get("services"), list) else []
-        lines.append(
-            f"Title: {row.get('label') or 'Unknown'} | "
-            f"Reason: {reason or 'n/a'} | "
+        file_path = _clean_text(row.get("file_path"))
+        line_span = ""
+        if row.get("start_line") and row.get("end_line"):
+            line_span = f":{row.get('start_line')}-{row.get('end_line')}"
+        chunk = _trim_context_chunk(row.get("chunk"))
+        header = (
+            f"Evidence {index} | Title: {row.get('label') or row.get('title') or file_path or 'Unknown'} | "
+            f"Type: {row.get('type') or 'n/a'} | "
+            f"Repo: {row.get('repo_id') or 'n/a'} | "
+            f"File: {(file_path + line_span) if file_path else 'n/a'} | "
+            f"Similarity: {row.get('_vector_score', 'n/a')} | Score: {row.get('_score', 'n/a')}"
+        )
+        details = (
+            f"Reason: {reason or 'n/a'}\n"
             f"Services: {', '.join(str(item) for item in services) if services else 'n/a'}"
         )
-    return "\n".join(lines)
+        if chunk:
+            details += f"\nCode Context:\n```\n{chunk}\n```"
+        blocks.append(f"{header}\n{details}")
+    return "\n\n".join(blocks)
 
 
 def _rank_rows(query: str, rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
@@ -301,7 +340,7 @@ def _rank_rows_with_intent(
     seen: set[str] = set()
 
     for row in rows:
-        row_id = _clean_text(row.get("id")) or _clean_text(row.get("node_id"))
+        row_id = _source_key(row)
         key = row_id or f"{_clean_text(row.get('label'))}:{_clean_text(row.get('chunk'))}"
         if key in seen:
             continue
@@ -362,7 +401,7 @@ def search_nodes(question: str, limit: int = 5, repo_id: str | None = None) -> l
 
 
 def _graph_context(node_ids: list[str], repo_id: str | None = None) -> list[dict[str, Any]]:
-    clean_ids = [_clean_text(node_id) for node_id in node_ids if _clean_text(node_id)]
+    clean_ids = list(dict.fromkeys(_clean_text(node_id) for node_id in node_ids if _clean_text(node_id)))
     if not clean_ids:
         return []
 
@@ -398,7 +437,7 @@ def retrieve_context(question: str, repo_id: str | None = None) -> dict[str, Any
     service_rows = _service_lexical_search(question, intent.get("services", []), limit=8, repo_id=repo_id)
 
     node_ids = [
-        _clean_text(row.get("id") or row.get("node_id"))
+        _clean_text(row.get("node_id") or row.get("id"))
         for row in lexical_rows + vector_rows + decision_focus_rows + service_rows
         if _clean_text(row.get("id") or row.get("node_id"))
     ]

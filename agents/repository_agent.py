@@ -83,6 +83,12 @@ EXTENSION_TO_LANGUAGE = {
     ".md": "Markdown",
 }
 
+GITHUB_HTTPS_REPO_RE = re.compile(
+    r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
 
 class RepoImportRequest(BaseModel):
     repo_url: str = Field(..., examples=["https://github.com/Dinol-ino/DevContext"])
@@ -129,24 +135,40 @@ def safe_rmtree(dir_path: Path) -> None:
 
 
 def parse_github_url(url: str) -> tuple[str, str, str]:
-    """Parse owner, name, and full_name from a Git URL."""
+    """Parse owner, name, and full_name from a GitHub HTTPS URL."""
     cleaned = url.strip().rstrip("/")
-    if cleaned.endswith(".git"):
-        cleaned = cleaned[:-4]
-    
-    match = re.search(r'github\.com[:/]([^/]+)/([^/]+)', cleaned)
-    if match:
-        owner = match.group(1)
-        repo = match.group(2)
-        return owner, repo, f"{owner}/{repo}"
-    
-    parts = [p for p in cleaned.split("/") if p]
-    if len(parts) >= 2:
-        owner = parts[-2]
-        repo = parts[-1]
-        return owner, repo, f"{owner}/{repo}"
-    
-    raise ValueError("Invalid Git repository URL format.")
+    match = GITHUB_HTTPS_REPO_RE.fullmatch(cleaned)
+    if not match:
+        raise ValueError("Repository URL must be a public GitHub HTTPS URL in the form https://github.com/owner/repo.")
+
+    owner = match.group("owner")
+    repo = match.group("repo")
+    return owner, repo, f"{owner}/{repo}"
+
+
+def validate_branch_name(branch: str) -> str:
+    clean_branch = branch.strip()
+    if not clean_branch:
+        raise ValueError("Branch cannot be empty.")
+
+    if not SAFE_BRANCH_RE.fullmatch(clean_branch):
+        raise ValueError("Branch contains unsupported characters.")
+
+    if (
+        ".." in clean_branch
+        or clean_branch.startswith(("/", "."))
+        or clean_branch.endswith(("/", "."))
+        or "@{" in clean_branch
+        or "//" in clean_branch
+    ):
+        raise ValueError("Branch name is not safe to use.")
+
+    return clean_branch
+
+
+def branch_folder_suffix(branch: str) -> str:
+    safe_suffix = re.sub(r"[^A-Za-z0-9._-]+", "_", branch).strip("._")
+    return safe_suffix or "branch"
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +513,10 @@ def import_repository(payload: RepoImportRequest, current_user: dict = Depends(g
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    branch = payload.branch.strip() if payload.branch else None
+    try:
+        branch = validate_branch_name(payload.branch) if payload.branch else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     repo_key = f"{full_name}:{branch or 'default'}"
 
     # 1. Acquire thread-safe lock for repository
@@ -504,7 +529,8 @@ def import_repository(payload: RepoImportRequest, current_user: dict = Depends(g
 
     logger.info(f"[LOCK ACQUIRED] Acquired import lock for repository '{repo_key}'")
 
-    folder_name = f"{owner}_{repo_name}" + (f"_{branch}" if branch else "")
+    branch_suffix = branch_folder_suffix(branch) if branch else None
+    folder_name = f"{owner}_{repo_name}" + (f"_{branch_suffix}" if branch_suffix else "")
     clone_path = CLONED_REPOS_DIR / folder_name
     tmp_clone_dir = CLONED_REPOS_DIR / f"tmp_{uuid.uuid4().hex}"
 
@@ -623,7 +649,7 @@ def import_repository(payload: RepoImportRequest, current_user: dict = Depends(g
         # Code chunking and file-level embeddings
         try:
             logger.info(f"Initiating code embedding for repo {full_name} (id={node_id})...")
-            embed_result = embed_repository_chunks(node_id, str(clone_path))
+            embed_result = embed_repository_chunks(node_id, str(clone_path), repo_id=full_name)
             logger.info(f"Code embedding result: {embed_result}")
         except Exception as embed_exc:
             logger.warning(f"Code embedding failed (repo metadata stored): {embed_exc}")
@@ -648,7 +674,7 @@ def import_repository(payload: RepoImportRequest, current_user: dict = Depends(g
             except Exception:
                 pass
         gc.collect()
-        safe_rmtree(clone_path)
+        safe_rmtree(tmp_clone_dir)
 
         _repository_lock_manager.release(repo_key)
         logger.info(f"[LOCK RELEASED] Released import lock for repository '{repo_key}'")
