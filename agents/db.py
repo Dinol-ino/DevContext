@@ -397,10 +397,22 @@ def fetch_embedding_matches(query_embedding: list[float], limit: int = 5, repo_i
         if repo_id and _clean_text(repo_id):
             rpc_params["filter_repo_id"] = _clean_text(repo_id)
 
-        response = client.rpc("match_embeddings", rpc_params).execute()
-        return _merge_embedding_rows(response.data or [])
+        try:
+            response = client.rpc("match_embeddings", rpc_params).execute()
+            return _merge_embedding_rows(response.data or [])
+        except Exception as rpc_primary_exc:
+            # Fallback to legacy SQL RPC parameter names if database function uses legacy schema
+            legacy_params: dict[str, Any] = {
+                "query_embedding": clean_query,
+                "match_count": max(1, limit),
+                "match_threshold": 0.0,
+            }
+            if repo_id and _clean_text(repo_id):
+                legacy_params["filter_repo"] = _clean_text(repo_id)
+            response = client.rpc("match_embeddings", legacy_params).execute()
+            return _merge_embedding_rows(response.data or [])
     except Exception as exc:
-        logger.error("match_embeddings RPC failed; semantic search degraded until migration is applied: %s", exc)
+        logger.warning("match_embeddings RPC failed; falling back to python vector matching: %s", exc)
         if not _fallback_enabled():
             return []
 

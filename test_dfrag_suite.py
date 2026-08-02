@@ -143,7 +143,7 @@ ok_import, import_res = run_test(
     "1. Repository Import & Code Chunking",
     "POST",
     "/repo/import",
-    payload={"repository_url": TARGET_REPO_URL, "branch": "main"}
+    payload={"repo_url": TARGET_REPO_URL, "branch": "main"}
 )
 
 # --- Step 2: List Repositories ---
@@ -164,7 +164,6 @@ ok_ask, ask_res = run_test(
     payload={
         "question": "What is the architecture and main function of the DFRAG repository?",
         "repo_id": TARGET_REPO_ID,
-        "max_context_chunks": 5
     }
 )
 
@@ -204,7 +203,6 @@ ok_gov, gov_res = run_test(
     "POST",
     "/governance/check",
     payload={
-        "pr_url": "https://github.com/Dinol-ino/DFRAG/pull/1",
         "diff_text": diff_sample
     }
 )
@@ -218,9 +216,9 @@ ok_inc, inc_res = run_test(
     "POST",
     "/incident",
     payload={
-        "title": "High latency in embedding retrieval worker",
+        "alert_title": "High latency in embedding retrieval worker",
         "service_name": "dfrag-retriever",
-        "stacktrace": "TimeoutError: Vector search request exceeded 5000ms threshold"
+        "error_snippet": "TimeoutError: Vector search request exceeded 5000ms threshold"
     }
 )
 

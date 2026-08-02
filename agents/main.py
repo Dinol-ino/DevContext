@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -67,27 +68,30 @@ def _get_allowed_origins() -> list[str]:
 
     return origins
 
-app = FastAPI(title="DevContextIQ API", version="2.0.0")
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-
-@app.on_event("startup")
-def validate_configuration() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     logger.info("Verifying configuration and environment variables...")
     required = ["SUPABASE_URL", "OPENROUTER_API_KEY"]
     missing = [var for var in required if not os.getenv(var)]
-    
+
     # Check either SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY is present
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
     if not supabase_key:
         missing.append("SUPABASE_SERVICE_ROLE_KEY")
-        
+
     if missing:
         msg = f"Critical Startup Error: Missing required env vars: {', '.join(missing)}"
         logger.error(msg)
         raise RuntimeError(msg)
     logger.info("All required environment variables verified successfully.")
+    yield
+
+
+app = FastAPI(title="DevContextIQ API", version="2.0.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 
 @app.middleware("http")

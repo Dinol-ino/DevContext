@@ -42,22 +42,9 @@ def incident(payload: IncidentRequest, current_user: dict = Depends(get_current_
             error_snippet=payload.error_snippet,
         )
 
-        llm_text = call_llm(
-            INCIDENT_SYSTEM_PROMPT,
-            (
-                "Return strict JSON with keys issue, severity, likely_cause, fix_steps, warnings.\n\n"
-                f"Alert title: {payload.alert_title}\n"
-                f"Service: {payload.service_name}\n"
-                f"Error snippet: {payload.error_snippet}\n"
-                f"Baseline analysis: {result}"
-            ),
-        )
-        llm_data = parse_json_response(llm_text)
-        if llm_data:
-            result.update({key: value for key, value in llm_data.items() if key in result})
-
         return IncidentResponse(**result)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to analyze incident: {exc}") from exc
+

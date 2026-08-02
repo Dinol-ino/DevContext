@@ -3,6 +3,7 @@ venv/
 __pycache__/
 *.pyc
 *.log
+.tmp_*
 
 node_modules/
 frontend/node_modules/
@@ -15,9 +16,5 @@ build/
 .agents/
 ingestion/__pycache__/
 
-req.txt
-test.js
-test_backend.py
-MANUAL.md
-
 /cloned_repos/
+

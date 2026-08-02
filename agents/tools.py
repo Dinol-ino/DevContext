@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,9 @@ from dotenv import load_dotenv
 
 try:
     from .db import (
+        _clean_text,
+        _normalize_value,
+        _tokenize,
         fetch_decisions,
         fetch_embedding_matches,
         fetch_incidents,
@@ -22,6 +27,9 @@ try:
     )
 except ImportError:
     from db import (
+        _clean_text,
+        _normalize_value,
+        _tokenize,
         fetch_decisions,
         fetch_embedding_matches,
         fetch_incidents,
@@ -42,32 +50,27 @@ RECENT_KEYWORDS = {"recent", "latest", "changed", "change", "updated", "new"}
 DECISION_KEYWORDS = {"decision", "why", "architecture", "architectural", "rationale"}
 SERVICE_KEYWORDS = {"gateway", "auth", "db", "api", "frontend"}
 
-
-def _clean_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def _normalize_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        return " ".join(_clean_text(item) for item in value if _clean_text(item))
-    if isinstance(value, dict):
-        return " ".join(_clean_text(item) for item in value.values() if _clean_text(item))
-    return _clean_text(value)
+# Security/architecture danger patterns for governance conflict detection
+DANGER_PATTERNS = [
+    ("bypass", "Potential security/auth bypass detected in code changes"),
+    ("disable_auth", "Disabling authentication guard controls"),
+    ("unauthenticated", "Allowing unauthenticated access to protected boundaries"),
+    ("hardcoded", "Hardcoded credentials or sensitive configuration detected"),
+    ("disable_rate_limit", "Disabling API rate limiting or throttling controls"),
+    ("skip_validation", "Skipping input/security validation checks"),
+]
 
 
 def _metadata_value(row: dict[str, Any], key: str) -> Any:
-    metadata = row.get("metadata")
-    if isinstance(metadata, dict):
-        return metadata.get(key)
-    return None
+    """Safely extract a value from a row's metadata dict.
 
+    Returns the value for *key* if row["metadata"] is a dict and contains it,
+    otherwise returns None.  This is the single canonical accessor used by
+    format_sources, detect_conflict, analyze_incident, and the ranking pipeline.
+    """
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return metadata.get(key)
 
-def _tokenize(text: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", _clean_text(text).lower()))
 
 
 def _trim_text(text: str, limit: int = EMBEDDING_MAX_TEXT_LENGTH) -> str:
@@ -123,14 +126,9 @@ def _get_embedding_model():
         return None
 
 
-_EMBEDDING_MODEL_CACHE: list = []
-
-
+@lru_cache(maxsize=1)
 def _get_cached_model():
-    if not _EMBEDDING_MODEL_CACHE:
-        m = _get_embedding_model()
-        _EMBEDDING_MODEL_CACHE.append(m)
-    return _EMBEDDING_MODEL_CACHE[0]
+    return _get_embedding_model()
 
 
 def _generate_query_embedding(text: str) -> list[float]:
@@ -515,16 +513,7 @@ def detect_conflict(diff_text: str) -> dict[str, Any]:
             matched_labels.append(label)
 
     # Check for critical security and architectural code smells in the diff text
-    danger_patterns = [
-        ("bypass", "Potential security/auth bypass detected in code changes"),
-        ("disable_auth", "Disabling authentication guard controls"),
-        ("unauthenticated", "Allowing unauthenticated access to protected boundaries"),
-        ("hardcoded", "Hardcoded credentials or sensitive configuration detected"),
-        ("disable_rate_limit", "Disabling API rate limiting or throttling controls"),
-        ("skip_validation", "Skipping input/security validation checks"),
-    ]
-
-    for pattern, description in danger_patterns:
+    for pattern, description in DANGER_PATTERNS:
         if pattern in lowered:
             matched_conflicts.append({
                 "label": f"AI Risk Guard: {pattern.replace('_', ' ').title()}",

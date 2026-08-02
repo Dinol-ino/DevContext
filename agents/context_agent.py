@@ -7,12 +7,26 @@ from pydantic import BaseModel, Field, field_validator
 
 try:
     from .prompts import CONTEXT_SYSTEM_PROMPT
-    from .tools import call_llm, format_sources, get_used_model, retrieve_context
+    from .tools import (
+        _evidence_prompt,
+        _trim_context_chunk,
+        call_llm,
+        format_sources,
+        get_used_model,
+        retrieve_context,
+    )
     from .auth_utils import get_current_user
     from .db import add_chat_message
 except ImportError:
     from prompts import CONTEXT_SYSTEM_PROMPT
-    from tools import call_llm, format_sources, get_used_model, retrieve_context
+    from tools import (
+        _evidence_prompt,
+        _trim_context_chunk,
+        call_llm,
+        format_sources,
+        get_used_model,
+        retrieve_context,
+    )
     from auth_utils import get_current_user
     from db import add_chat_message
 
@@ -85,39 +99,8 @@ def _deterministic_answer(evidence: list[dict[str, Any]]) -> str:
     return " ".join(parts)
 
 
-def _trim_context_chunk(value: Any, limit: int = 1800) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "\n...[truncated]"
-
-
-def _evidence_prompt(evidence: list[dict[str, Any]]) -> str:
-    blocks: list[str] = []
-    for index, row in enumerate(evidence[:6], start=1):
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        reason = str(metadata.get("reason") or "").strip()
-        services = metadata.get("services") if isinstance(metadata.get("services"), list) else []
-        file_path = str(row.get("file_path") or "").strip()
-        line_span = ""
-        if row.get("start_line") and row.get("end_line"):
-            line_span = f":{row.get('start_line')}-{row.get('end_line')}"
-        chunk = _trim_context_chunk(row.get("chunk"))
-        header = (
-            f"Evidence {index} | Title: {row.get('label') or row.get('title') or file_path or 'Unknown'} | "
-            f"Type: {row.get('type') or 'n/a'} | "
-            f"Repo: {row.get('repo_id') or 'n/a'} | "
-            f"File: {(file_path + line_span) if file_path else 'n/a'} | "
-            f"Similarity: {row.get('_vector_score', 'n/a')} | Score: {row.get('_score', 'n/a')}"
-        )
-        details = (
-            f"Reason: {reason or 'n/a'}\n"
-            f"Services: {', '.join(str(item) for item in services) if services else 'n/a'}"
-        )
-        if chunk:
-            details += f"\nCode Context:\n```\n{chunk}\n```"
-        blocks.append(f"{header}\n{details}")
-    return "\n\n".join(blocks)
+# _trim_context_chunk and _evidence_prompt are imported from tools.py
+# to avoid maintaining duplicate implementations.
 
 
 @router.post("/ask", response_model=AskResponse)
